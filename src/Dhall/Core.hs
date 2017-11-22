@@ -1638,9 +1638,9 @@ shift d v (Note _ b) = b'
 -- and `shift` does nothing to a closed expression
 shift _ _ (Embed p) = Embed p
 
-type Substituter a = forall s. a -> Var -> Expr s a -> a
+type Substituter s a = a -> Var -> Expr s a -> a
 
-dontSubst :: Substituter a
+dontSubst :: Substituter s a
 dontSubst a _ _ = a
 
 subst :: Var -> Expr s a -> Expr t a -> Expr s a
@@ -1649,7 +1649,7 @@ subst = substWith dontSubst
 
 > subst x C B  ~  B[x := C]
 -}
-substWith :: Substituter a -> Var -> Expr s a -> Expr t a -> Expr s a
+substWith :: Substituter s a -> Var -> Expr s a -> Expr t a -> Expr s a
 substWith _ _ _ (Const a) = Const a
 substWith s (V x n) e (Lam y _A b) = Lam y _A' b'
   where
@@ -1833,7 +1833,7 @@ boundedType _                = False
 normalizeWith :: Normalizer a -> Expr s a -> Expr t a
 normalizeWith ctx e = normalizeAndSubstWith dontSubst ctx e
 
-normalizeAndSubstWith :: Substituter a -> Normalizer a -> Expr s a -> Expr t a
+normalizeAndSubstWith :: Substituter s a -> Normalizer a -> Expr s a -> Expr t a
 normalizeAndSubstWith s ctx e0 = loop (shift 0 "_" e0)
  where
     -- This is to avoid a `Show` constraint on the @a@ and @s@ in the type of
