@@ -28,8 +28,11 @@ module Dhall.Core (
     -- * Normalization
     , normalize
     , normalizeWith
+    , normalizeAndSubstWith
     , Normalizer
     , subst
+    , substWith
+    , Substituter
     , shift
     , isNormalized
     , isNormalizedWith
@@ -501,7 +504,7 @@ braces docs = enclose "{ " "{ " ", " ", " " }" "}" docs
 
 -- | Pretty-print anonymous functions and function types
 arrows :: [(Doc ann, Doc ann)] -> Doc ann
-arrows = enclose' "" "  " " → " "→ " 
+arrows = enclose' "" "  " " → " "→ "
 
 {-| Format an expression that holds a variable number of elements, such as a
     list, record, or union
@@ -1023,7 +1026,7 @@ prettyRecord a = braces (map adapt (Data.Map.toList a))
   where
     keyLength = fromIntegral (maximum (map Text.length (Data.Map.keys a)))
 
-    adapt = prettyKeyValue ":" keyLength 
+    adapt = prettyKeyValue ":" keyLength
 
 prettyRecordLit :: Pretty a => Map Text (Expr s a) -> Doc ann
 prettyRecordLit a
@@ -1635,140 +1638,148 @@ shift d v (Note _ b) = b'
 -- and `shift` does nothing to a closed expression
 shift _ _ (Embed p) = Embed p
 
+type Substituter a = forall s. a -> Var -> Expr s a -> a
+
+dontSubst :: Substituter a
+dontSubst a _ _ = a
+
+subst :: Var -> Expr s a -> Expr t a -> Expr s a
+subst = substWith dontSubst
 {-| Substitute all occurrences of a variable with an expression
 
 > subst x C B  ~  B[x := C]
 -}
-subst :: Var -> Expr s a -> Expr t a -> Expr s a
-subst _ _ (Const a) = Const a
-subst (V x n) e (Lam y _A b) = Lam y _A' b'
+substWith :: Substituter a -> Var -> Expr s a -> Expr t a -> Expr s a
+substWith _ _ _ (Const a) = Const a
+substWith s (V x n) e (Lam y _A b) = Lam y _A' b'
   where
-    _A' = subst (V x n )                  e  _A
-    b'  = subst (V x n') (shift 1 (V y 0) e)  b
+    _A' = substWith s (V x n )                  e  _A
+    b'  = substWith s (V x n') (shift 1 (V y 0) e)  b
     n'  = if x == y then n + 1 else n
-subst (V x n) e (Pi y _A _B) = Pi y _A' _B'
+substWith s (V x n) e (Pi y _A _B) = Pi y _A' _B'
   where
-    _A' = subst (V x n )                  e  _A
-    _B' = subst (V x n') (shift 1 (V y 0) e) _B
+    _A' = substWith s (V x n )                  e  _A
+    _B' = substWith s (V x n') (shift 1 (V y 0) e) _B
     n'  = if x == y then n + 1 else n
-subst v e (App f a) = App f' a'
+substWith s v e (App f a) = App f' a'
   where
-    f' = subst v e f
-    a' = subst v e a
-subst v e (Var v') = if v == v' then e else Var v'
-subst (V x n) e (Let f mt r b) = Let f mt' r' b'
+    f' = substWith s v e f
+    a' = substWith s v e a
+substWith _ v e (Var v') = if v == v' then e else Var v'
+substWith s (V x n) e (Let f mt r b) = Let f mt' r' b'
   where
-    b' = subst (V x n') (shift 1 (V f 0) e) b
+    b' = substWith s (V x n') (shift 1 (V f 0) e) b
       where
         n' = if x == f then n + 1 else n
 
-    mt' = fmap (subst (V x n) e) mt
-    r'  =       subst (V x n) e  r
-subst x e (Annot a b) = Annot a' b'
+    mt' = fmap (substWith s (V x n) e) mt
+    r'  =       substWith s (V x n) e  r
+substWith s x e (Annot a b) = Annot a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst _ _ Bool = Bool
-subst _ _ (BoolLit a) = BoolLit a
-subst x e (BoolAnd a b) = BoolAnd a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith _ _ _ Bool = Bool
+substWith _ _ _ (BoolLit a) = BoolLit a
+substWith s x e (BoolAnd a b) = BoolAnd a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (BoolOr a b) = BoolOr a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (BoolOr a b) = BoolOr a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (BoolEQ a b) = BoolEQ a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (BoolEQ a b) = BoolEQ a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (BoolNE a b) = BoolNE a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (BoolNE a b) = BoolNE a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (BoolIf a b c) = BoolIf a' b' c'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (BoolIf a b c) = BoolIf a' b' c'
   where
-    a' = subst x e a
-    b' = subst x e b
-    c' = subst x e c
-subst _ _ Natural = Natural
-subst _ _ (NaturalLit a) = NaturalLit a
-subst _ _ NaturalFold = NaturalFold
-subst _ _ NaturalBuild = NaturalBuild
-subst _ _ NaturalIsZero = NaturalIsZero
-subst _ _ NaturalEven = NaturalEven
-subst _ _ NaturalOdd = NaturalOdd
-subst _ _ NaturalToInteger = NaturalToInteger
-subst _ _ NaturalShow = NaturalShow
-subst x e (NaturalPlus a b) = NaturalPlus a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+    c' = substWith s x e c
+substWith _ _ _ Natural = Natural
+substWith _ _ _ (NaturalLit a) = NaturalLit a
+substWith _ _ _ NaturalFold = NaturalFold
+substWith _ _ _ NaturalBuild = NaturalBuild
+substWith _ _ _ NaturalIsZero = NaturalIsZero
+substWith _ _ _ NaturalEven = NaturalEven
+substWith _ _ _ NaturalOdd = NaturalOdd
+substWith _ _ _ NaturalToInteger = NaturalToInteger
+substWith _ _ _ NaturalShow = NaturalShow
+substWith s x e (NaturalPlus a b) = NaturalPlus a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (NaturalTimes a b) = NaturalTimes a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (NaturalTimes a b) = NaturalTimes a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst _ _ Integer = Integer
-subst _ _ (IntegerLit a) = IntegerLit a
-subst _ _ IntegerShow = IntegerShow
-subst _ _ Double = Double
-subst _ _ (DoubleLit a) = DoubleLit a
-subst _ _ DoubleShow = DoubleShow
-subst _ _ Text = Text
-subst _ _ (TextLit a) = TextLit a
-subst x e (TextAppend a b) = TextAppend a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith _ _ _ Integer = Integer
+substWith _ _ _ (IntegerLit a) = IntegerLit a
+substWith _ _ _ IntegerShow = IntegerShow
+substWith _ _ _ Double = Double
+substWith _ _ _ (DoubleLit a) = DoubleLit a
+substWith _ _ _ DoubleShow = DoubleShow
+substWith _ _ _ Text = Text
+substWith _ _ _ (TextLit a) = TextLit a
+substWith s x e (TextAppend a b) = TextAppend a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst _ _ List = List
-subst x e (ListLit a b) = ListLit a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith _ _ _ List = List
+substWith s x e (ListLit a b) = ListLit a' b'
   where
-    a' = fmap (subst x e) a
-    b' = fmap (subst x e) b
-subst x e (ListAppend a b) = ListAppend a' b'
+    a' = fmap (substWith s x e) a
+    b' = fmap (substWith s x e) b
+substWith s x e (ListAppend a b) = ListAppend a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst _ _ ListBuild = ListBuild
-subst _ _ ListFold = ListFold
-subst _ _ ListLength = ListLength
-subst _ _ ListHead = ListHead
-subst _ _ ListLast = ListLast
-subst _ _ ListIndexed = ListIndexed
-subst _ _ ListReverse = ListReverse
-subst _ _ Optional = Optional
-subst x e (OptionalLit a b) = OptionalLit a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith _ _ _ ListBuild = ListBuild
+substWith _ _ _ ListFold = ListFold
+substWith _ _ _ ListLength = ListLength
+substWith _ _ _ ListHead = ListHead
+substWith _ _ _ ListLast = ListLast
+substWith _ _ _ ListIndexed = ListIndexed
+substWith _ _ _ ListReverse = ListReverse
+substWith _ _ _ Optional = Optional
+substWith s x e (OptionalLit a b) = OptionalLit a' b'
   where
-    a' =       subst x e  a
-    b' = fmap (subst x e) b
-subst _ _ OptionalFold = OptionalFold
-subst _ _ OptionalBuild = OptionalBuild
-subst x e (Record       kts) = Record                   (fmap (subst x e) kts)
-subst x e (RecordLit    kvs) = RecordLit                (fmap (subst x e) kvs)
-subst x e (Union        kts) = Union                    (fmap (subst x e) kts)
-subst x e (UnionLit a b kts) = UnionLit a (subst x e b) (fmap (subst x e) kts)
-subst x e (Combine a b) = Combine a' b'
+    a' =       substWith s x e  a
+    b' = fmap (substWith s x e) b
+substWith _ _ _ OptionalFold = OptionalFold
+substWith _ _ _ OptionalBuild = OptionalBuild
+substWith s x e (Record       kts) = Record                   (fmap (substWith s x e) kts)
+substWith s x e (RecordLit    kvs) = RecordLit                (fmap (substWith s x e) kvs)
+substWith s x e (Union        kts) = Union                    (fmap (substWith s x e) kts)
+substWith s x e (UnionLit a b kts) = UnionLit a (substWith s x e b) (fmap (substWith s x e) kts)
+substWith s x e (Combine a b) = Combine a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (Prefer a b) = Prefer a' b'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (Prefer a b) = Prefer a' b'
   where
-    a' = subst x e a
-    b' = subst x e b
-subst x e (Merge a b c) = Merge a' b' c'
+    a' = substWith s x e a
+    b' = substWith s x e b
+substWith s x e (Merge a b c) = Merge a' b' c'
   where
-    a' =       subst x e  a
-    b' =       subst x e  b
-    c' = fmap (subst x e) c
-subst x e (Field a b) = Field a' b
+    a' =       substWith s x e  a
+    b' =       substWith s x e  b
+    c' = fmap (substWith s x e) c
+substWith s x e (Field a b) = Field a' b
   where
-    a' = subst x e a
-subst x e (Note _ b) = b'
+    a' = substWith s x e a
+substWith s x e (Note _ b) = b'
   where
-    b' = subst x e b
+    b' = substWith s x e b
 -- The Dhall compiler enforces that all embedded values are closed expressions
 -- and `subst` does nothing to a closed expression
-subst _ _ (Embed p) = Embed p
+-- NOTE: NOT ANYMORE!
+substWith s v e (Embed p) = Embed (s p v e)
 
 {-| Reduce an expression to its normal form, performing beta reduction
 
@@ -1806,21 +1817,24 @@ boundedType _                = False
 
 {-| Reduce an expression to its normal form, performing beta reduction and applying
     any custom definitions.
-   
+
     `normalizeWith` is designed to be used with function `typeWith`. The `typeWith`
-    function allows typing of Dhall functions in a custom typing context whereas 
-    `normalizeWith` allows evaluating Dhall expressions in a custom context. 
+    function allows typing of Dhall functions in a custom typing context whereas
+    `normalizeWith` allows evaluating Dhall expressions in a custom context.
 
     To be more precise `normalizeWith` applies the given normalizer when it finds an
     application term that it cannot reduce by other means.
 
     Note that the context used in normalization will determine the properties of normalization.
     That is, if the functions in custom context are not total then the Dhall language, evaluated
-    with those functions is not total either.  
-   
+    with those functions is not total either.
+
 -}
 normalizeWith :: Normalizer a -> Expr s a -> Expr t a
-normalizeWith ctx e0 = loop (shift 0 "_" e0)
+normalizeWith ctx e = normalizeAndSubstWith dontSubst ctx e
+
+normalizeAndSubstWith :: Substituter a -> Normalizer a -> Expr s a -> Expr t a
+normalizeAndSubstWith s ctx e0 = loop (shift 0 "_" e0)
  where
     -- This is to avoid a `Show` constraint on the @a@ and @s@ in the type of
     -- `loop`.  In theory, this might change a failing repro case into
@@ -1845,7 +1859,7 @@ normalizeWith ctx e0 = loop (shift 0 "_" e0)
         Lam x _A b -> loop b''  -- Beta reduce
           where
             a'  = shift   1  (V x 0) a
-            b'  = subst (V x 0) a' b
+            b'  = substWith s (V x 0) a' b
             b'' = shift (-1) (V x 0) b'
         f' -> case App f' a' of
             -- fold/build fusion for `List`
@@ -1976,7 +1990,7 @@ normalizeWith ctx e0 = loop (shift 0 "_" e0)
     Let f _ r b -> loop b''
       where
         r'  = shift   1  (V f 0) r
-        b'  = subst (V f 0) r' b
+        b'  = substWith s (V f 0) r' b
         b'' = shift (-1) (V f 0) b'
     Annot x _ -> loop x
     Bool -> Bool
@@ -2166,8 +2180,8 @@ normalizeWith ctx e0 = loop (shift 0 "_" e0)
 type Normalizer a = forall s. Expr s a -> Maybe (Expr s a)
 
 -- | Check if an expression is in a normal form given a context of evaluation.
---   Unlike `isNormalized`, this will fully normalize and traverse through the expression. 
---   
+--   Unlike `isNormalized`, this will fully normalize and traverse through the expression.
+--
 --   It is much more efficient to use `isNormalized`.
 isNormalizedWith :: (Eq s, Eq a) => Normalizer a -> Expr s a -> Bool
 isNormalizedWith ctx e = e == (normalizeWith ctx e)
