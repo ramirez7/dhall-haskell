@@ -2,6 +2,8 @@
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE PatternGuards      #-}
+
 {-# OPTIONS_GHC -Wall #-}
 
 -- | This module contains the logic for type checking Dhall code
@@ -10,8 +12,10 @@ module Dhall.TypeCheck (
     -- * Type-checking
       typeWith
     , typeOf
+    , typeWithA
 
     -- * Types
+    , TypeChecker
     , X(..)
     , TypeError(..)
     , DetailedTypeError(..)
@@ -40,7 +44,7 @@ import qualified Data.Vector
 import qualified Dhall.Context
 import qualified Dhall.Core
 
-axiom :: Const -> Either (TypeError s) Const
+axiom :: Const -> Either (TypeError s a) Const
 axiom Type = return Kind
 axiom Kind = Left (TypeError Dhall.Context.empty (Const Kind) Untyped)
 
@@ -61,7 +65,7 @@ match (V xL nL) (V xR nR) ((xL', xR'):xs) =
     nL' = if xL == xL' then nL - 1 else nL
     nR' = if xR == xR' then nR - 1 else nR
 
-propEqual :: Expr s X -> Expr t X -> Bool
+propEqual :: Eq a => Expr s a -> Expr t a -> Bool
 propEqual eL0 eR0 =
     State.evalState
         (go (Dhall.Core.normalize eL0) (Dhall.Core.normalize eR0))
@@ -112,6 +116,7 @@ propEqual eL0 eR0 =
             loop [] [] = return True
             loop _  _  = return False
         loop (Data.Map.toList ktsL0) (Data.Map.toList ktsR0)
+    go (Embed aL) (Embed aR) = return (aL == aR)
     go _ _ = return False
 
 {-| Type-check an expression and return the expression's type if type-checking
@@ -121,29 +126,41 @@ propEqual eL0 eR0 =
     is not necessary for just type-checking.  If you actually care about the
     returned type then you may want to `Dhall.Core.normalize` it afterwards.
 -}
-typeWith :: Context (Expr s X) -> Expr s X -> Either (TypeError s) (Expr s X)
-typeWith _     (Const c         ) = do
+typeWith :: Context (Expr s X) -> Expr s X -> Either (TypeError s X) (Expr s X)
+typeWith = typeWithA (\_ _ -> Nothing)
+
+-- TODO: Doc comment
+type TypeChecker a =
+      forall s
+    . (Expr s a -> Either (TypeError s a) (Expr s a)) -- Overall type-checker
+   -> Expr s a -- Expression being type-checked
+   -> Maybe (Either (TypeError s a) (Expr s a)) -- Nothing to "pass"
+
+-- TODO: Custom normalization too?
+typeWithA :: Eq a => TypeChecker a -> Context (Expr s a) -> Expr s a -> Either (TypeError s a) (Expr s a)
+typeWithA tc ctx e | Just res <- tc (typeWithA tc ctx) e = res
+typeWithA _ _     (Const c         ) = do
     fmap Const (axiom c)
-typeWith ctx e@(Var (V x n)     ) = do
+typeWithA _ ctx e@(Var (V x n)     ) = do
     case Dhall.Context.lookup x n ctx of
         Nothing -> Left (TypeError ctx e (UnboundVariable x))
         Just a  -> return a
-typeWith ctx   (Lam x _A  b     ) = do
-    _ <- typeWith ctx _A
+typeWithA tc ctx   (Lam x _A  b     ) = do
+    _ <- typeWithA tc ctx _A
     let ctx' = fmap (Dhall.Core.shift 1 (V x 0)) (Dhall.Context.insert x _A ctx)
-    _B <- typeWith ctx' b
+    _B <- typeWithA tc ctx' b
     let p = Pi x _A _B
-    _t <- typeWith ctx p
+    _t <- typeWithA tc ctx p
     return p
-typeWith ctx e@(Pi  x _A _B     ) = do
-    tA <- fmap Dhall.Core.normalize (typeWith ctx _A)
+typeWithA tc ctx e@(Pi  x _A _B     ) = do
+    tA <- fmap Dhall.Core.normalize (typeWithA tc ctx _A)
     kA <- case tA of
         Const k -> return k
         _       -> Left (TypeError ctx e (InvalidInputType _A))
 
-    _ <- typeWith ctx _A
+    _ <- typeWithA tc ctx _A
     let ctx' = fmap (Dhall.Core.shift 1 (V x 0)) (Dhall.Context.insert x _A ctx)
-    tB <- fmap Dhall.Core.normalize (typeWith ctx' _B)
+    tB <- fmap Dhall.Core.normalize (typeWithA tc ctx' _B)
     kB <- case tB of
         Const k -> return k
         _       -> Left (TypeError ctx' e (InvalidOutputType _B))
@@ -151,12 +168,12 @@ typeWith ctx e@(Pi  x _A _B     ) = do
     case rule kA kB of
         Left () -> Left (TypeError ctx e (NoDependentTypes _A _B))
         Right k -> Right (Const k)
-typeWith ctx e@(App f a         ) = do
-    tf <- fmap Dhall.Core.normalize (typeWith ctx f)
+typeWithA tc ctx e@(App f a         ) = do
+    tf <- fmap Dhall.Core.normalize (typeWithA tc ctx f)
     (x, _A, _B) <- case tf of
         Pi x _A _B -> return (x, _A, _B)
         _          -> Left (TypeError ctx e (NotAFunction f tf))
-    _A' <- typeWith ctx a
+    _A' <- typeWithA tc ctx a
     if propEqual _A _A'
         then do
             let a'   = Dhall.Core.shift   1  (V x 0) a
@@ -167,9 +184,9 @@ typeWith ctx e@(App f a         ) = do
             let nf_A  = Dhall.Core.normalize _A
             let nf_A' = Dhall.Core.normalize _A'
             Left (TypeError ctx e (TypeMismatch f nf_A a nf_A'))
-typeWith ctx e@(Let f mt r b ) = do
-    tR  <- typeWith ctx r
-    ttR <- fmap Dhall.Core.normalize (typeWith ctx tR)
+typeWithA tc ctx e@(Let f mt r b ) = do
+    tR  <- typeWithA tc ctx r
+    ttR <- fmap Dhall.Core.normalize (typeWithA tc ctx tR)
     kR  <- case ttR of
         Const k -> return k
         -- Don't bother to provide a `let`-specific version of this error
@@ -177,8 +194,8 @@ typeWith ctx e@(Let f mt r b ) = do
         _       -> Left (TypeError ctx e (InvalidInputType tR))
 
     let ctx' = fmap (Dhall.Core.shift 1 (V f 0)) (Dhall.Context.insert f tR ctx)
-    tB  <- typeWith ctx' b
-    ttB <- fmap Dhall.Core.normalize (typeWith ctx' tB)
+    tB  <- typeWithA tc ctx' b
+    ttB <- fmap Dhall.Core.normalize (typeWithA tc ctx' tB)
     kB  <- case ttB of
         Const k -> return k
         -- Don't bother to provide a `let`-specific version of this error
@@ -193,7 +210,7 @@ typeWith ctx e@(Let f mt r b ) = do
         Nothing -> do
             return ()
         Just t  -> do
-            _ <- typeWith ctx t
+            _ <- typeWithA tc ctx t
             let nf_t  = Dhall.Core.normalize t
             let nf_tR = Dhall.Core.normalize tR
             if propEqual nf_tR nf_t
@@ -204,11 +221,11 @@ typeWith ctx e@(Let f mt r b ) = do
     let tB'  = Dhall.Core.subst (V f 0) r' (Dhall.Core.normalize tB)
     let tB'' = Dhall.Core.shift (-1) (V f 0) tB'
     return tB''
-typeWith ctx e@(Annot x t       ) = do
+typeWithA tc ctx e@(Annot x t       ) = do
     -- This is mainly just to check that `t` is not `Kind`
-    _ <- typeWith ctx t
+    _ <- typeWithA tc ctx t
 
-    t' <- typeWith ctx x
+    t' <- typeWithA tc ctx x
     if propEqual t t'
         then do
             return t
@@ -216,71 +233,71 @@ typeWith ctx e@(Annot x t       ) = do
             let nf_t  = Dhall.Core.normalize t
             let nf_t' = Dhall.Core.normalize t'
             Left (TypeError ctx e (AnnotMismatch x nf_t nf_t'))
-typeWith _      Bool              = do
+typeWithA _ _      Bool              = do
     return (Const Type)
-typeWith _     (BoolLit _       ) = do
+typeWithA _ _     (BoolLit _       ) = do
     return Bool
-typeWith ctx e@(BoolAnd l r     ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(BoolAnd l r     ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantAnd l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantAnd r tr))
 
     return Bool
-typeWith ctx e@(BoolOr  l r     ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(BoolOr  l r     ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantOr l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantOr r tr))
 
     return Bool
-typeWith ctx e@(BoolEQ  l r     ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(BoolEQ  l r     ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantEQ l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantEQ r tr))
 
     return Bool
-typeWith ctx e@(BoolNE  l r     ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(BoolNE  l r     ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantNE l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Bool -> return ()
         _    -> Left (TypeError ctx e (CantNE r tr))
 
     return Bool
-typeWith ctx e@(BoolIf x y z    ) = do
-    tx <- fmap Dhall.Core.normalize (typeWith ctx x)
+typeWithA tc ctx e@(BoolIf x y z    ) = do
+    tx <- fmap Dhall.Core.normalize (typeWithA tc ctx x)
     case tx of
         Bool -> return ()
         _    -> Left (TypeError ctx e (InvalidPredicate x tx))
-    ty  <- fmap Dhall.Core.normalize (typeWith ctx y )
-    tty <- fmap Dhall.Core.normalize (typeWith ctx ty)
+    ty  <- fmap Dhall.Core.normalize (typeWithA tc ctx y )
+    tty <- fmap Dhall.Core.normalize (typeWithA tc ctx ty)
     case tty of
         Const Type -> return ()
         _          -> Left (TypeError ctx e (IfBranchMustBeTerm True y ty tty))
 
-    tz <- fmap Dhall.Core.normalize (typeWith ctx z)
-    ttz <- fmap Dhall.Core.normalize (typeWith ctx tz)
+    tz <- fmap Dhall.Core.normalize (typeWithA tc ctx z)
+    ttz <- fmap Dhall.Core.normalize (typeWithA tc ctx tz)
     case ttz of
         Const Type -> return ()
         _          -> Left (TypeError ctx e (IfBranchMustBeTerm False z tz ttz))
@@ -289,95 +306,95 @@ typeWith ctx e@(BoolIf x y z    ) = do
         then return ()
         else Left (TypeError ctx e (IfBranchMismatch y z ty tz))
     return ty
-typeWith _      Natural           = do
+typeWithA _ _      Natural           = do
     return (Const Type)
-typeWith _     (NaturalLit _    ) = do
+typeWithA _ _     (NaturalLit _    ) = do
     return Natural
-typeWith _      NaturalFold       = do
+typeWithA _ _      NaturalFold       = do
     return
         (Pi "_" Natural
             (Pi "natural" (Const Type)
                 (Pi "succ" (Pi "_" "natural" "natural")
                     (Pi "zero" "natural" "natural") ) ) )
-typeWith _      NaturalBuild      = do
+typeWithA _ _      NaturalBuild      = do
     return
         (Pi "_"
             (Pi "natural" (Const Type)
                 (Pi "succ" (Pi "_" "natural" "natural")
                     (Pi "zero" "natural" "natural") ) )
             Natural )
-typeWith _      NaturalIsZero     = do
+typeWithA _ _      NaturalIsZero     = do
     return (Pi "_" Natural Bool)
-typeWith _      NaturalEven       = do
+typeWithA _ _      NaturalEven       = do
     return (Pi "_" Natural Bool)
-typeWith _      NaturalOdd        = do
+typeWithA _ _      NaturalOdd        = do
     return (Pi "_" Natural Bool)
-typeWith _      NaturalToInteger  = do
+typeWithA _ _      NaturalToInteger  = do
     return (Pi "_" Natural Integer)
-typeWith _      NaturalShow  = do
+typeWithA _ _      NaturalShow  = do
     return (Pi "_" Natural Text)
-typeWith ctx e@(NaturalPlus  l r) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(NaturalPlus  l r) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Natural -> return ()
         _       -> Left (TypeError ctx e (CantAdd l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Natural -> return ()
         _       -> Left (TypeError ctx e (CantAdd r tr))
     return Natural
-typeWith ctx e@(NaturalTimes l r) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(NaturalTimes l r) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Natural -> return ()
         _       -> Left (TypeError ctx e (CantMultiply l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Natural -> return ()
         _       -> Left (TypeError ctx e (CantMultiply r tr))
     return Natural
-typeWith _      Integer           = do
+typeWithA _ _      Integer           = do
     return (Const Type)
-typeWith _     (IntegerLit _    ) = do
+typeWithA _ _     (IntegerLit _    ) = do
     return Integer
-typeWith _      IntegerShow  = do
+typeWithA _ _      IntegerShow  = do
     return (Pi "_" Integer Text)
-typeWith _      Double            = do
+typeWithA _ _      Double            = do
     return (Const Type)
-typeWith _     (DoubleLit _     ) = do
+typeWithA _ _     (DoubleLit _     ) = do
     return Double
-typeWith _     DoubleShow         = do
+typeWithA _ _     DoubleShow         = do
     return (Pi "_" Double Text)
-typeWith _      Text              = do
+typeWithA _ _      Text              = do
     return (Const Type)
-typeWith _     (TextLit _       ) = do
+typeWithA _ _     (TextLit _       ) = do
     return Text
-typeWith ctx e@(TextAppend l r  ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(TextAppend l r  ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     case tl of
         Text -> return ()
         _    -> Left (TypeError ctx e (CantTextAppend l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case tr of
         Text -> return ()
         _    -> Left (TypeError ctx e (CantTextAppend r tr))
     return Text
-typeWith _      List              = do
+typeWithA _ _      List              = do
     return (Pi "_" (Const Type) (Const Type))
-typeWith ctx e@(ListLit  Nothing  xs) = do
+typeWithA tc ctx e@(ListLit  Nothing  xs) = do
     if Data.Vector.null xs
         then Left (TypeError ctx e MissingListType)
         else do
-            t <- typeWith ctx (Data.Vector.head xs)
-            s <- fmap Dhall.Core.normalize (typeWith ctx t)
+            t <- typeWithA tc ctx (Data.Vector.head xs)
+            s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
             case s of
                 Const Type -> return ()
                 _ -> Left (TypeError ctx e (InvalidListType t))
             flip Data.Vector.imapM_ xs (\i x -> do
-                t' <- typeWith ctx x
+                t' <- typeWithA tc ctx x
                 if propEqual t t'
                     then return ()
                     else do
@@ -386,13 +403,13 @@ typeWith ctx e@(ListLit  Nothing  xs) = do
                         let err   = MismatchedListElements i nf_t x nf_t'
                         Left (TypeError ctx e err) )
             return (App List t)
-typeWith ctx e@(ListLit (Just t ) xs) = do
-    s <- fmap Dhall.Core.normalize (typeWith ctx t)
+typeWithA tc ctx e@(ListLit (Just t ) xs) = do
+    s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
     case s of
         Const Type -> return ()
         _ -> Left (TypeError ctx e (InvalidListType t))
     flip Data.Vector.imapM_ xs (\i x -> do
-        t' <- typeWith ctx x
+        t' <- typeWithA tc ctx x
         if propEqual t t'
             then return ()
             else do
@@ -400,13 +417,13 @@ typeWith ctx e@(ListLit (Just t ) xs) = do
                 let nf_t' = Dhall.Core.normalize t'
                 Left (TypeError ctx e (InvalidListElement i nf_t x nf_t')) )
     return (App List t)
-typeWith ctx e@(ListAppend l r  ) = do
-    tl <- fmap Dhall.Core.normalize (typeWith ctx l)
+typeWithA tc ctx e@(ListAppend l r  ) = do
+    tl <- fmap Dhall.Core.normalize (typeWithA tc ctx l)
     el <- case tl of
         App List el -> return el
         _           -> Left (TypeError ctx e (CantListAppend l tl))
 
-    tr <- fmap Dhall.Core.normalize (typeWith ctx r)
+    tr <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     er <- case tr of
         App List er -> return er
         _           -> Left (TypeError ctx e (CantListAppend r tr))
@@ -414,7 +431,7 @@ typeWith ctx e@(ListAppend l r  ) = do
     if propEqual el er
         then return (App List el)
         else Left (TypeError ctx e (ListAppendMismatch el er))
-typeWith _      ListBuild         = do
+typeWithA _ _      ListBuild         = do
     return
         (Pi "a" (Const Type)
             (Pi "_"
@@ -422,31 +439,31 @@ typeWith _      ListBuild         = do
                     (Pi "cons" (Pi "_" "a" (Pi "_" "list" "list"))
                         (Pi "nil" "list" "list") ) )
                 (App List "a") ) )
-typeWith _      ListFold          = do
+typeWithA _ _      ListFold          = do
     return
         (Pi "a" (Const Type)
             (Pi "_" (App List "a")
                 (Pi "list" (Const Type)
                     (Pi "cons" (Pi "_" "a" (Pi "_" "list" "list"))
                         (Pi "nil" "list" "list")) ) ) )
-typeWith _      ListLength        = do
+typeWithA _ _      ListLength        = do
     return (Pi "a" (Const Type) (Pi "_" (App List "a") Natural))
-typeWith _      ListHead          = do
+typeWithA _ _      ListHead          = do
     return (Pi "a" (Const Type) (Pi "_" (App List "a") (App Optional "a")))
-typeWith _      ListLast          = do
+typeWithA _ _      ListLast          = do
     return (Pi "a" (Const Type) (Pi "_" (App List "a") (App Optional "a")))
-typeWith _      ListIndexed       = do
+typeWithA _ _      ListIndexed       = do
     let kts = [("index", Natural), ("value", "a")]
     return
         (Pi "a" (Const Type)
             (Pi "_" (App List "a")
                 (App List (Record (Data.Map.fromList kts))) ) )
-typeWith _      ListReverse       = do
+typeWithA _ _      ListReverse       = do
     return (Pi "a" (Const Type) (Pi "_" (App List "a") (App List "a")))
-typeWith _      Optional          = do
+typeWithA _ _      Optional          = do
     return (Pi "_" (Const Type) (Const Type))
-typeWith ctx e@(OptionalLit t xs) = do
-    s <- fmap Dhall.Core.normalize (typeWith ctx t)
+typeWithA tc ctx e@(OptionalLit t xs) = do
+    s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
     case s of
         Const Type -> return ()
         _ -> Left (TypeError ctx e (InvalidOptionalType t))
@@ -455,7 +472,7 @@ typeWith ctx e@(OptionalLit t xs) = do
         then Left (TypeError ctx e (InvalidOptionalLiteral n))
         else return ()
     forM_ xs (\x -> do
-        t' <- typeWith ctx x
+        t' <- typeWithA tc ctx x
         if propEqual t t'
             then return ()
             else do
@@ -463,61 +480,61 @@ typeWith ctx e@(OptionalLit t xs) = do
                 let nf_t' = Dhall.Core.normalize t'
                 Left (TypeError ctx e (InvalidOptionalElement nf_t x nf_t')) )
     return (App Optional t)
-typeWith _      OptionalFold      = do
+typeWithA _ _      OptionalFold      = do
     return
         (Pi "a" (Const Type)
             (Pi "_" (App Optional "a")
                 (Pi "optional" (Const Type)
                     (Pi "just" (Pi "_" "a" "optional")
                         (Pi "nothing" "optional" "optional") ) ) ) )
-typeWith _      OptionalBuild     = do
+typeWithA _ _      OptionalBuild     = do
     return
         (Pi "a" (Const Type)
             (Pi "_" f (App Optional "a") ) )
     where f = Pi "optional" (Const Type)
                   (Pi "just" (Pi "_" "a" "optional")
                       (Pi "nothing" "optional" "optional") )
-typeWith ctx e@(Record    kts   ) = do
+typeWithA tc ctx e@(Record    kts   ) = do
     let process (k, t) = do
-            s <- fmap Dhall.Core.normalize (typeWith ctx t)
+            s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
             case s of
                 Const Type -> return ()
                 _          -> Left (TypeError ctx e (InvalidFieldType k t))
     mapM_ process (Data.Map.toList kts)
     return (Const Type)
-typeWith ctx e@(RecordLit kvs   ) = do
+typeWithA tc ctx e@(RecordLit kvs   ) = do
     let process (k, v) = do
-            t <- typeWith ctx v
-            s <- fmap Dhall.Core.normalize (typeWith ctx t)
+            t <- typeWithA tc ctx v
+            s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
             case s of
                 Const Type -> return ()
                 _          -> Left (TypeError ctx e (InvalidField k v))
             return (k, t)
     kts <- mapM process (Data.Map.toAscList kvs)
     return (Record (Data.Map.fromAscList kts))
-typeWith ctx e@(Union     kts   ) = do
+typeWithA tc ctx e@(Union     kts   ) = do
     let process (k, t) = do
-            s <- fmap Dhall.Core.normalize (typeWith ctx t)
+            s <- fmap Dhall.Core.normalize (typeWithA tc ctx t)
             case s of
                 Const Type -> return ()
                 _          -> Left (TypeError ctx e (InvalidAlternativeType k t))
     mapM_ process (Data.Map.toList kts)
     return (Const Type)
-typeWith ctx e@(UnionLit k v kts) = do
+typeWithA tc ctx e@(UnionLit k v kts) = do
     case Data.Map.lookup k kts of
         Just _  -> Left (TypeError ctx e (DuplicateAlternative k))
         Nothing -> return ()
-    t <- typeWith ctx v
+    t <- typeWithA tc ctx v
     let union = Union (Data.Map.insert k t kts)
-    _ <- typeWith ctx union
+    _ <- typeWithA tc ctx union
     return union
-typeWith ctx e@(Combine kvsX kvsY) = do
-    tKvsX <- fmap Dhall.Core.normalize (typeWith ctx kvsX)
+typeWithA tc ctx e@(Combine kvsX kvsY) = do
+    tKvsX <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsX)
     ktsX  <- case tKvsX of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustCombineARecord '∧' kvsX tKvsX))
 
-    tKvsY <- fmap Dhall.Core.normalize (typeWith ctx kvsY)
+    tKvsY <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsY)
     ktsY  <- case tKvsY of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustCombineARecord '∧' kvsY tKvsY))
@@ -539,25 +556,25 @@ typeWith ctx e@(Combine kvsX kvsY) = do
             return (Record (Data.Map.fromList kts))
 
     combineTypes ktsX ktsY
-typeWith ctx e@(Prefer kvsX kvsY) = do
-    tKvsX <- fmap Dhall.Core.normalize (typeWith ctx kvsX)
+typeWithA tc ctx e@(Prefer kvsX kvsY) = do
+    tKvsX <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsX)
     ktsX  <- case tKvsX of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustCombineARecord '⫽' kvsX tKvsX))
 
-    tKvsY <- fmap Dhall.Core.normalize (typeWith ctx kvsY)
+    tKvsY <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsY)
     ktsY  <- case tKvsY of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustCombineARecord '⫽' kvsY tKvsY))
     return (Record (Data.Map.union ktsY ktsX))
-typeWith ctx e@(Merge kvsX kvsY (Just t)) = do
-    tKvsX <- fmap Dhall.Core.normalize (typeWith ctx kvsX)
+typeWithA tc ctx e@(Merge kvsX kvsY (Just t)) = do
+    tKvsX <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsX)
     ktsX  <- case tKvsX of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustMergeARecord kvsX tKvsX))
     let ksX = Data.Map.keysSet ktsX
 
-    tKvsY <- fmap Dhall.Core.normalize (typeWith ctx kvsY)
+    tKvsY <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsY)
     ktsY  <- case tKvsY of
         Union kts -> return kts
         _         -> Left (TypeError ctx e (MustMergeUnion kvsY tKvsY))
@@ -585,14 +602,14 @@ typeWith ctx e@(Merge kvsX kvsY (Just t)) = do
                         _ -> Left (TypeError ctx e (HandlerNotAFunction kY tX))
     mapM_ process (Data.Map.toList ktsY)
     return t
-typeWith ctx e@(Merge kvsX kvsY Nothing) = do
-    tKvsX <- fmap Dhall.Core.normalize (typeWith ctx kvsX)
+typeWithA tc ctx e@(Merge kvsX kvsY Nothing) = do
+    tKvsX <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsX)
     ktsX  <- case tKvsX of
         Record kts -> return kts
         _          -> Left (TypeError ctx e (MustMergeARecord kvsX tKvsX))
     let ksX = Data.Map.keysSet ktsX
 
-    tKvsY <- fmap Dhall.Core.normalize (typeWith ctx kvsY)
+    tKvsY <- fmap Dhall.Core.normalize (typeWithA tc ctx kvsY)
     ktsY  <- case tKvsY of
         Union kts -> return kts
         _         -> Left (TypeError ctx e (MustMergeUnion kvsY tKvsY))
@@ -624,26 +641,25 @@ typeWith ctx e@(Merge kvsX kvsY Nothing) = do
                         _ -> Left (TypeError ctx e (HandlerNotAFunction kY tX))
     mapM_ process (Data.Map.toList ktsY)
     return t
-typeWith ctx e@(Field r x       ) = do
-    t <- fmap Dhall.Core.normalize (typeWith ctx r)
+typeWithA tc ctx e@(Field r x       ) = do
+    t <- fmap Dhall.Core.normalize (typeWithA tc ctx r)
     case t of
         Record kts ->
             case Data.Map.lookup x kts of
                 Just t' -> return t'
                 Nothing -> Left (TypeError ctx e (MissingField x t))
         _          -> Left (TypeError ctx e (NotARecord x r t))
-typeWith ctx   (Note s e'       ) = case typeWith ctx e' of
+typeWithA tc ctx   (Note s e'       ) = case typeWithA tc ctx e' of
     Left (TypeError ctx' (Note s' e'') m) -> Left (TypeError ctx' (Note s' e'') m)
     Left (TypeError ctx'          e''  m) -> Left (TypeError ctx' (Note s  e'') m)
     Right r                               -> Right r
-typeWith _     (Embed p         ) = do
-    absurd p
+typeWithA _ ctx     (Embed p         ) = Left $ (TypeError ctx (Embed p) (UnknownEmbed p))
 
 {-| `typeOf` is the same as `typeWith` with an empty context, meaning that the
     expression must be closed (i.e. no free variables), otherwise type-checking
     will fail.
 -}
-typeOf :: Expr s X -> Either (TypeError s) (Expr s X)
+typeOf :: Expr s X -> Either (TypeError s X) (Expr s X)
 typeOf = typeWith Dhall.Context.empty
 
 -- | Like `Data.Void.Void`, except with a shorter inferred type
@@ -662,62 +678,63 @@ instance Pretty X where
     pretty = absurd
 
 -- | The specific type error
-data TypeMessage s
+data TypeMessage s a
     = UnboundVariable Text
-    | InvalidInputType (Expr s X)
-    | InvalidOutputType (Expr s X)
-    | NotAFunction (Expr s X) (Expr s X)
-    | TypeMismatch (Expr s X) (Expr s X) (Expr s X) (Expr s X)
-    | AnnotMismatch (Expr s X) (Expr s X) (Expr s X)
+    | InvalidInputType (Expr s a)
+    | InvalidOutputType (Expr s a)
+    | NotAFunction (Expr s a) (Expr s a)
+    | TypeMismatch (Expr s a) (Expr s a) (Expr s a) (Expr s a)
+    | AnnotMismatch (Expr s a) (Expr s a) (Expr s a)
     | Untyped
     | MissingListType
-    | MismatchedListElements Int (Expr s X) (Expr s X) (Expr s X)
-    | InvalidListElement Int (Expr s X) (Expr s X) (Expr s X)
-    | InvalidListType (Expr s X)
-    | InvalidOptionalElement (Expr s X) (Expr s X) (Expr s X)
+    | MismatchedListElements Int (Expr s a) (Expr s a) (Expr s a)
+    | InvalidListElement Int (Expr s a) (Expr s a) (Expr s a)
+    | InvalidListType (Expr s a)
+    | InvalidOptionalElement (Expr s a) (Expr s a) (Expr s a)
     | InvalidOptionalLiteral Int
-    | InvalidOptionalType (Expr s X)
-    | InvalidPredicate (Expr s X) (Expr s X)
-    | IfBranchMismatch (Expr s X) (Expr s X) (Expr s X) (Expr s X)
-    | IfBranchMustBeTerm Bool (Expr s X) (Expr s X) (Expr s X)
-    | InvalidField Text (Expr s X)
-    | InvalidFieldType Text (Expr s X)
-    | InvalidAlternative Text (Expr s X)
-    | InvalidAlternativeType Text (Expr s X)
-    | ListAppendMismatch (Expr s X) (Expr s X)
+    | InvalidOptionalType (Expr s a)
+    | InvalidPredicate (Expr s a) (Expr s a)
+    | IfBranchMismatch (Expr s a) (Expr s a) (Expr s a) (Expr s a)
+    | IfBranchMustBeTerm Bool (Expr s a) (Expr s a) (Expr s a)
+    | InvalidField Text (Expr s a)
+    | InvalidFieldType Text (Expr s a)
+    | InvalidAlternative Text (Expr s a)
+    | InvalidAlternativeType Text (Expr s a)
+    | ListAppendMismatch (Expr s a) (Expr s a)
     | DuplicateAlternative Text
-    | MustCombineARecord Char (Expr s X) (Expr s X)
+    | MustCombineARecord Char (Expr s a) (Expr s a)
     | FieldCollision Text
-    | MustMergeARecord (Expr s X) (Expr s X)
-    | MustMergeUnion (Expr s X) (Expr s X)
+    | MustMergeARecord (Expr s a) (Expr s a)
+    | MustMergeUnion (Expr s a) (Expr s a)
     | UnusedHandler (Set Text)
     | MissingHandler (Set Text)
-    | HandlerInputTypeMismatch Text (Expr s X) (Expr s X)
-    | HandlerOutputTypeMismatch Text (Expr s X) Text (Expr s X)
-    | InvalidHandlerOutputType Text (Expr s X) (Expr s X)
+    | HandlerInputTypeMismatch Text (Expr s a) (Expr s a)
+    | HandlerOutputTypeMismatch Text (Expr s a) Text (Expr s a)
+    | InvalidHandlerOutputType Text (Expr s a) (Expr s a)
     | MissingMergeType
-    | HandlerNotAFunction Text (Expr s X)
-    | NotARecord Text (Expr s X) (Expr s X)
-    | MissingField Text (Expr s X)
-    | CantAnd (Expr s X) (Expr s X)
-    | CantOr (Expr s X) (Expr s X)
-    | CantEQ (Expr s X) (Expr s X)
-    | CantNE (Expr s X) (Expr s X)
-    | CantTextAppend (Expr s X) (Expr s X)
-    | CantListAppend (Expr s X) (Expr s X)
-    | CantAdd (Expr s X) (Expr s X)
-    | CantMultiply (Expr s X) (Expr s X)
-    | NoDependentLet (Expr s X) (Expr s X)
-    | NoDependentTypes (Expr s X) (Expr s X)
+    | HandlerNotAFunction Text (Expr s a)
+    | NotARecord Text (Expr s a) (Expr s a)
+    | MissingField Text (Expr s a)
+    | CantAnd (Expr s a) (Expr s a)
+    | CantOr (Expr s a) (Expr s a)
+    | CantEQ (Expr s a) (Expr s a)
+    | CantNE (Expr s a) (Expr s a)
+    | CantTextAppend (Expr s a) (Expr s a)
+    | CantListAppend (Expr s a) (Expr s a)
+    | CantAdd (Expr s a) (Expr s a)
+    | CantMultiply (Expr s a) (Expr s a)
+    | NoDependentLet (Expr s a) (Expr s a)
+    | NoDependentTypes (Expr s a) (Expr s a)
+    | UnknownEmbed a
     deriving (Show)
 
-shortTypeMessage :: TypeMessage s -> Builder
+shortTypeMessage :: Buildable a => TypeMessage s a -> Builder
 shortTypeMessage msg =
     "\ESC[1;31mError\ESC[0m: " <> build short <> "\n"
   where
     ErrorMessages {..} = prettyTypeMessage msg
 
-longTypeMessage :: TypeMessage s -> Builder
+longTypeMessage :: Buildable a => TypeMessage s a -> Builder
 longTypeMessage msg =
         "\ESC[1;31mError\ESC[0m: " <> build short <> "\n"
     <>  "\n"
@@ -735,7 +752,7 @@ data ErrorMessages = ErrorMessages
 _NOT :: Builder
 _NOT = "\ESC[1mnot\ESC[0m"
 
-prettyTypeMessage :: TypeMessage s -> ErrorMessages
+prettyTypeMessage :: Buildable a => TypeMessage s a -> ErrorMessages
 prettyTypeMessage (UnboundVariable _) = ErrorMessages {..}
   -- We do not need to print variable name here. For the discussion see:
   -- https://github.com/dhall-lang/dhall-haskell/pull/116
@@ -3053,8 +3070,12 @@ prettyTypeMessage (NoDependentLet expr0 expr1) = ErrorMessages {..}
       where
         txt0 = build expr0
         txt1 = build expr1
+prettyTypeMessage (UnknownEmbed _) = ErrorMessages {..}
+  where
+    short = ""
+    long = ""
 
-buildBooleanOperator :: Text -> Expr s X -> Expr s X -> ErrorMessages
+buildBooleanOperator :: Buildable a => Text -> Expr s a -> Expr s a -> ErrorMessages
 buildBooleanOperator operator expr0 expr1 = ErrorMessages {..}
   where
     short = "❰" <> txt2 <> "❱ only works on ❰Bool❱s"
@@ -3083,7 +3104,7 @@ buildBooleanOperator operator expr0 expr1 = ErrorMessages {..}
 
     txt2 = build operator
 
-buildNaturalOperator :: Text -> Expr s X -> Expr s X -> ErrorMessages
+buildNaturalOperator :: Buildable a => Text -> Expr s a -> Expr s a -> ErrorMessages
 buildNaturalOperator operator expr0 expr1 = ErrorMessages {..}
   where
     short = "❰" <> txt2 <> "❱ only works on ❰Natural❱s"
@@ -3145,18 +3166,18 @@ buildNaturalOperator operator expr0 expr1 = ErrorMessages {..}
     txt2 = build operator
 
 -- | A structured type error that includes context
-data TypeError s = TypeError
-    { context     :: Context (Expr s X)
-    , current     :: Expr s X
-    , typeMessage :: TypeMessage s
+data TypeError s a = TypeError
+    { context     :: Context (Expr s a)
+    , current     :: Expr s a
+    , typeMessage :: TypeMessage s a
     } deriving (Typeable)
 
-instance Buildable s => Show (TypeError s) where
+instance (Buildable a, Buildable s) => Show (TypeError s a) where
     show = Text.unpack . Builder.toLazyText . build
 
-instance (Buildable s, Typeable s) => Exception (TypeError s)
+instance (Buildable a, Typeable a, Buildable s, Typeable s) => Exception (TypeError s a)
 
-instance Buildable s => Buildable (TypeError s) where
+instance (Buildable a, Buildable s) => Buildable (TypeError s a) where
     build (TypeError ctx expr msg)
         =   "\n"
         <>  (   if  Text.null (Builder.toLazyText (buildContext ctx))
@@ -3182,15 +3203,15 @@ instance Buildable s => Buildable (TypeError s) where
 {-| Newtype used to wrap error messages so that they render with a more
     detailed explanation of what went wrong
 -}
-newtype DetailedTypeError s = DetailedTypeError (TypeError s)
+newtype DetailedTypeError s a = DetailedTypeError (TypeError s a)
     deriving (Typeable)
 
-instance Buildable s => Show (DetailedTypeError s) where
+instance (Buildable a, Buildable s) => Show (DetailedTypeError s a) where
     show = Text.unpack . Builder.toLazyText . build
 
-instance (Buildable s, Typeable s) => Exception (DetailedTypeError s)
+instance (Buildable a, Typeable a, Buildable s, Typeable s) => Exception (DetailedTypeError s a)
 
-instance Buildable s => Buildable (DetailedTypeError s) where
+instance (Buildable a, Buildable s) => Buildable (DetailedTypeError s a) where
     build (DetailedTypeError (TypeError ctx expr msg))
         =   "\n"
         <>  (   if  Text.null (Builder.toLazyText (buildContext ctx))
