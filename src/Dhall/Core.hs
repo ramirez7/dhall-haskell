@@ -101,7 +101,7 @@ import qualified Filesystem.Path.CurrentOS as Filesystem
     Note that Dhall does not support functions from terms to types and therefore
     Dhall is not a dependently typed language
 -}
-data Const = Type | Kind deriving (Show, Eq, Bounded, Enum)
+data Const = Type | Kind deriving (Show, Eq, Ord, Bounded, Enum)
 
 instance Buildable Const where
     build = buildConst
@@ -202,7 +202,7 @@ instance Pretty Path where
     appear as a numeric suffix.
 -}
 data Var = V Text !Integer
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 instance IsString Var where
     fromString str = V (fromString str) 0
@@ -336,7 +336,7 @@ data Expr s a
     | Note s (Expr s a)
     -- | > Embed path                               ~  path
     | Embed a
-    deriving (Functor, Foldable, Traversable, Show, Eq)
+    deriving (Functor, Foldable, Traversable, Show, Eq, Ord)
 
 instance Applicative (Expr s) where
     pure = Embed
@@ -473,7 +473,7 @@ instance IsString (Expr s a) where
     fromString str = Var (fromString str)
 
 data Chunks s a = Chunks [(Builder, Expr s a)] Builder
-    deriving (Functor, Foldable, Traversable, Show, Eq)
+    deriving (Functor, Foldable, Traversable, Show, Eq, Ord)
 
 instance Monoid (Chunks s a) where
     mempty = Chunks [] mempty
@@ -522,7 +522,7 @@ braces docs = enclose "{ " "{ " ", " ", " " }" "}" docs
 
 -- | Pretty-print anonymous functions and function types
 arrows :: [(Doc ann, Doc ann)] -> Doc ann
-arrows = enclose' "" "  " " → " "→ " 
+arrows = enclose' "" "  " " → " "→ "
 
 {-| Format an expression that holds a variable number of elements, such as a
     list, record, or union
@@ -1078,7 +1078,7 @@ prettyRecord a = braces (map adapt (Data.Map.toList a))
   where
     keyLength = fromIntegral (maximum (map Text.length (Data.Map.keys a)))
 
-    adapt = prettyKeyValue ":" keyLength 
+    adapt = prettyKeyValue ":" keyLength
 
 prettyRecordLit :: Pretty a => Map Text (Expr s a) -> Doc ann
 prettyRecordLit a
@@ -1961,18 +1961,18 @@ denote (Embed a             ) = Embed a
 
 {-| Reduce an expression to its normal form, performing beta reduction and applying
     any custom definitions.
-   
+
     `normalizeWith` is designed to be used with function `typeWith`. The `typeWith`
-    function allows typing of Dhall functions in a custom typing context whereas 
-    `normalizeWith` allows evaluating Dhall expressions in a custom context. 
+    function allows typing of Dhall functions in a custom typing context whereas
+    `normalizeWith` allows evaluating Dhall expressions in a custom context.
 
     To be more precise `normalizeWith` applies the given normalizer when it finds an
     application term that it cannot reduce by other means.
 
     Note that the context used in normalization will determine the properties of normalization.
     That is, if the functions in custom context are not total then the Dhall language, evaluated
-    with those functions is not total either.  
-   
+    with those functions is not total either.
+
 -}
 normalizeWith :: Normalizer a -> Expr s a -> Expr t a
 normalizeWith ctx e0 = loop (denote e0)
@@ -2345,8 +2345,8 @@ normalizeWith ctx e0 = loop (denote e0)
 type Normalizer a = forall s. Expr s a -> Maybe (Expr s a)
 
 -- | Check if an expression is in a normal form given a context of evaluation.
---   Unlike `isNormalized`, this will fully normalize and traverse through the expression. 
---   
+--   Unlike `isNormalized`, this will fully normalize and traverse through the expression.
+--
 --   It is much more efficient to use `isNormalized`.
 isNormalizedWith :: (Eq s, Eq a) => Normalizer a -> Expr s a -> Bool
 isNormalizedWith ctx e = e == (normalizeWith ctx e)
