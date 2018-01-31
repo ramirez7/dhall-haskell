@@ -152,7 +152,7 @@ inputWith
     -- ^ The type of value to decode from Dhall to Haskell
     -> Dhall.Context.Context (Expr Src X)
     -- ^ The starting context for type-checking
-    -> Dhall.Core.Normalizer X
+    -> Dhall.Core.Normalizer Src X
     -> Text
     -- ^ The Dhall program
     -> IO a
@@ -189,7 +189,7 @@ rawInput
     :: Alternative f
     => Type a
     -- ^ The type of value to decode from Dhall to Haskell
-    -> Expr s X
+    -> Expr Src X
     -- ^ a closed form Dhall program, which evaluates to the expected type
     -> f a
     -- ^ The decoded value in Haskell

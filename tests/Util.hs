@@ -31,7 +31,7 @@ import           Test.Tasty.HUnit
 normalize' :: Expr Src X -> Data.Text.Lazy.Text
 normalize' = Dhall.Core.pretty . Dhall.Core.normalize
 
-normalizeWith' :: Normalizer X -> Expr Src X -> Data.Text.Lazy.Text
+normalizeWith' :: (forall s. Normalizer s X) -> Expr Src X -> Data.Text.Lazy.Text
 normalizeWith' ctx = Dhall.Core.pretty . Dhall.Core.normalizeWith ctx
 
 code :: Data.Text.Text -> IO (Expr Src X)
@@ -51,17 +51,17 @@ codeWith ctx strictText = do
 
 equivalent :: Data.Text.Text -> Data.Text.Text -> IO ()
 equivalent text0 text1 = do
-    expr0 <- fmap Dhall.Core.normalize (Util.code text0) :: IO (Expr X X)
-    expr1 <- fmap Dhall.Core.normalize (Util.code text1) :: IO (Expr X X)
+    expr0 <- fmap Dhall.Core.normalize (Util.code text0) :: IO (Expr Src X)
+    expr1 <- fmap Dhall.Core.normalize (Util.code text1) :: IO (Expr Src X)
     assertEqual "Expressions are not equivalent" expr0 expr1
 
 assertNormalizesTo :: Expr Src X -> Data.Text.Lazy.Text -> IO ()
-assertNormalizesTo e expected = do 
+assertNormalizesTo e expected = do
   assertBool msg (not $ Dhall.Core.isNormalized e)
   normalize' e @?= expected
   where msg = "Given expression is already in normal form"
 
-assertNormalizesToWith :: Normalizer X -> Expr Src X -> Data.Text.Lazy.Text -> IO ()
+assertNormalizesToWith :: (forall s. Normalizer s X) -> Expr Src X -> Data.Text.Lazy.Text -> IO ()
 assertNormalizesToWith ctx e expected = do
   assertBool msg (not $ Dhall.Core.isNormalizedWith ctx (first (const ()) e))
   normalizeWith' ctx e @?= expected

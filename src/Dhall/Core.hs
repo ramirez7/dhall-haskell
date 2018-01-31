@@ -1872,7 +1872,7 @@ subst _ _ (Embed p) = Embed p
     However, `normalize` will not fail if the expression is ill-typed and will
     leave ill-typed sub-expressions unevaluated.
 -}
-normalize ::  Expr s a -> Expr t a
+normalize ::  Expr s a -> Expr s a
 normalize = normalizeWith (const Nothing)
 
 {-| This function is used to determine whether folds like @Natural/fold@ or
@@ -1974,7 +1974,7 @@ denote (Embed a             ) = Embed a
     with those functions is not total either.
 
 -}
-normalizeWith :: Normalizer a -> Expr s a -> Expr t a
+normalizeWith :: Normalizer s a -> Expr s a -> Expr s a
 normalizeWith ctx e0 = loop (denote e0)
  where
     -- This is to avoid a `Show` constraint on the @a@ and @s@ in the type of
@@ -2342,13 +2342,13 @@ normalizeWith ctx e0 = loop (denote e0)
 
 -- | Use this to wrap you embedded functions (see `normalizeWith`) to make them
 --   polymorphic enough to be used.
-type Normalizer a = forall s. Expr s a -> Maybe (Expr s a)
+type Normalizer s a = Expr s a -> Maybe (Expr s a)
 
 -- | Check if an expression is in a normal form given a context of evaluation.
 --   Unlike `isNormalized`, this will fully normalize and traverse through the expression.
 --
 --   It is much more efficient to use `isNormalized`.
-isNormalizedWith :: (Eq s, Eq a) => Normalizer a -> Expr s a -> Bool
+isNormalizedWith :: (Eq s, Eq a) => Normalizer s a -> Expr s a -> Bool
 isNormalizedWith ctx e = e == (normalizeWith ctx e)
 
 
