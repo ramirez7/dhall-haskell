@@ -127,9 +127,9 @@ propEqual eL0 eR0 =
 typeWith :: Context (Expr s X) -> Expr s X -> Either (TypeError s X) (Expr s X)
 typeWith = typeWithA absurd
 
-type Typer a = forall s. a -> Expr s a
+type Typer s a = a -> Expr s a
 
-typeWithA :: Eq a => Typer a -> Context (Expr s a) -> Expr s a -> Either (TypeError s a) (Expr s a)
+typeWithA :: Eq a => Typer s a -> Context (Expr s a) -> Expr s a -> Either (TypeError s a) (Expr s a)
 typeWithA tpa = loop
   where
     loop _     (Const c         ) = do
@@ -2788,7 +2788,7 @@ prettyTypeMessage (ConstructorsRequiresAUnionType expr0 expr1) = ErrorMessages {
       where
         txt0 = build expr0
         txt1 = build expr1
- 
+
 prettyTypeMessage (NotARecord k expr0 expr1) = ErrorMessages {..}
   where
     short = "Not a record"
@@ -2963,7 +2963,7 @@ prettyTypeMessage (CantInterpolate expr0 expr1) = ErrorMessages {..}
         txt0 = build expr0
         txt1 = build expr1
 
- 
+
 
 prettyTypeMessage (CantTextAppend expr0 expr1) = ErrorMessages {..}
   where
