@@ -11,6 +11,7 @@ module Dhall.TypeCheck (
       typeWith
     , typeOf
     , typeWithA
+    , typeWithAN
 
     -- * Types
     , Typer
