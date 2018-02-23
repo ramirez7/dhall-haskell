@@ -52,37 +52,34 @@ import Control.Applicative (Applicative(..), (<$>))
 import Control.Applicative (empty)
 import Data.Bifunctor (Bifunctor(..))
 import Data.Foldable
+import Data.HashMap.Strict.InsOrd (InsOrdHashMap)
 import Data.HashSet (HashSet)
-import Data.Map (Map)
 import Data.Monoid ((<>))
 import Data.String (IsString(..))
+import Data.Scientific (Scientific)
 import Data.Text.Buildable (Buildable(..))
 import Data.Text.Lazy (Text)
 import Data.Text.Lazy.Builder (Builder)
-import Data.Text.Prettyprint.Doc (Doc, Pretty)
+import Data.Text.Prettyprint.Doc (Pretty)
 import Data.Traversable
 import Data.Vector (Vector)
-import Filesystem.Path.CurrentOS (FilePath)
+import {-# SOURCE #-} Dhall.Pretty.Internal
 import Numeric.Natural (Natural)
-import Prelude hiding (FilePath, succ)
+import Prelude hiding (succ)
 
 import qualified Control.Monad
 import qualified Data.ByteString
 import qualified Data.ByteString.Char8
 import qualified Data.ByteString.Base16
-import qualified Data.Char
+import qualified Data.HashMap.Strict.InsOrd
 import qualified Data.HashSet
-import qualified Data.List
-import qualified Data.Map
 import qualified Data.Maybe
 import qualified Data.Text
-import qualified Data.Text.Lazy            as Text
-import qualified Data.Text.Lazy.Builder    as Builder
+import qualified Data.Text.Lazy                        as Text
+import qualified Data.Text.Lazy.Builder                as Builder
 import qualified Data.Text.Prettyprint.Doc             as Pretty
-import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
 import qualified Data.Vector
 import qualified Data.Vector.Mutable
-import qualified Filesystem.Path.CurrentOS as Filesystem
 
 {-| Constants for a pure type system
 
@@ -121,9 +118,7 @@ data PathType
 
 instance Buildable PathType where
     build (File Home     file)
-        = "~/" <> build txt
-      where
-        txt = Text.fromStrict (either id id (Filesystem.toText file))
+        = "~/" <> build (Text.pack file)
     build (File Homeless file)
         |  Text.isPrefixOf  "./" txt
         || Text.isPrefixOf   "/" txt
@@ -132,7 +127,7 @@ instance Buildable PathType where
         | otherwise
         = "./" <> build txt <> " "
       where
-        txt = Text.fromStrict (either id id (Filesystem.toText file))
+        txt = Text.pack file
     build (URL str  Nothing      ) = build str <> " "
     build (URL str (Just headers)) = build str <> " using " <> build headers <> " "
     build (Env env) = "env:" <> build env
@@ -140,6 +135,7 @@ instance Buildable PathType where
 -- | How to interpret the path's contents (i.e. as Dhall code or raw text)
 data PathMode = Code | RawText deriving (Eq, Ord, Show)
 
+-- | A `PathType` extended with an optional hash for semantic integrity checks
 data PathHashed = PathHashed
     { hash     :: Maybe Data.ByteString.ByteString
     , pathType :: PathType
@@ -274,7 +270,7 @@ data Expr s a
     -- | > Double                                   ~  Double
     | Double
     -- | > DoubleLit n                              ~  n
-    | DoubleLit Double
+    | DoubleLit Scientific
     -- | > DoubleShow                               ~  Double/show
     | DoubleShow
     -- | > Text                                     ~  Text
@@ -314,19 +310,19 @@ data Expr s a
     -- | > OptionalBuild                            ~  Optional/build
     | OptionalBuild
     -- | > Record            [(k1, t1), (k2, t2)]   ~  { k1 : t1, k2 : t1 }
-    | Record    (Map Text (Expr s a))
+    | Record    (InsOrdHashMap Text (Expr s a))
     -- | > RecordLit         [(k1, v1), (k2, v2)]   ~  { k1 = v1, k2 = v2 }
-    | RecordLit (Map Text (Expr s a))
+    | RecordLit (InsOrdHashMap Text (Expr s a))
     -- | > Union             [(k1, t1), (k2, t2)]   ~  < k1 : t1 | k2 : t2 >
-    | Union     (Map Text (Expr s a))
+    | Union     (InsOrdHashMap Text (Expr s a))
     -- | > UnionLit (k1, v1) [(k2, t2), (k3, t3)]   ~  < k1 = t1 | k2 : t2 | k3 : t3 >
-    | UnionLit Text (Expr s a) (Map Text (Expr s a))
+    | UnionLit Text (Expr s a) (InsOrdHashMap Text (Expr s a))
     -- | > Combine x y                              ~  x ∧ y
     | Combine (Expr s a) (Expr s a)
     -- | > CombineRight x y                         ~  x ⫽ y
     | Prefer (Expr s a) (Expr s a)
     -- | > Merge x y (Just t )                      ~  merge x y : t
-    -- | > Merge x y  Nothing                       ~  merge x y
+    --   > Merge x y  Nothing                       ~  merge x y
     | Merge (Expr s a) (Expr s a) (Maybe (Expr s a))
     -- | > Constructors e                           ~  constructors e
     | Constructors (Expr s a)
@@ -336,7 +332,7 @@ data Expr s a
     | Note s (Expr s a)
     -- | > Embed path                               ~  path
     | Embed a
-    deriving (Functor, Foldable, Traversable, Show, Eq, Ord)
+    deriving (Functor, Foldable, Traversable, Show, Eq)
 
 instance Applicative (Expr s) where
     pure = Embed
@@ -472,8 +468,9 @@ instance Bifunctor Expr where
 instance IsString (Expr s a) where
     fromString str = Var (fromString str)
 
+-- | The body of an interpolated @Text@ literal
 data Chunks s a = Chunks [(Builder, Expr s a)] Builder
-    deriving (Functor, Foldable, Traversable, Show, Eq, Ord)
+    deriving (Functor, Foldable, Traversable, Show, Eq)
 
 instance Monoid (Chunks s a) where
     mempty = Chunks [] mempty
@@ -497,1021 +494,12 @@ instance IsString (Chunks s a) where
     case the corresponding builder.
 -}
 
-{-| Internal utility for pretty-printing, used when generating element lists
-    to supply to `enclose` or `enclose'`.  This utility indicates that the
-    compact represent is the same as the multi-line representation for each
-    element
--}
-duplicate :: a -> (a, a)
-duplicate x = (x, x)
-
--- | Pretty-print a list
-list :: [Doc ann] -> Doc ann
-list   [] = "[]"
-list docs = enclose "[ " "[ " ", " ", " " ]" "]" (fmap duplicate docs)
-
--- | Pretty-print union types and literals
-angles :: [(Doc ann, Doc ann)] -> Doc ann
-angles   [] = "<>"
-angles docs = enclose "< " "< " " | " "| " " >" ">" docs
-
--- | Pretty-print record types and literals
-braces :: [(Doc ann, Doc ann)] -> Doc ann
-braces   [] = "{}"
-braces docs = enclose "{ " "{ " ", " ", " " }" "}" docs
-
--- | Pretty-print anonymous functions and function types
-arrows :: [(Doc ann, Doc ann)] -> Doc ann
-arrows = enclose' "" "  " " → " "→ "
-
-{-| Format an expression that holds a variable number of elements, such as a
-    list, record, or union
--}
-enclose
-    :: Doc ann
-    -- ^ Beginning document for compact representation
-    -> Doc ann
-    -- ^ Beginning document for multi-line representation
-    -> Doc ann
-    -- ^ Separator for compact representation
-    -> Doc ann
-    -- ^ Separator for multi-line representation
-    -> Doc ann
-    -- ^ Ending document for compact representation
-    -> Doc ann
-    -- ^ Ending document for multi-line representation
-    -> [(Doc ann, Doc ann)]
-    -- ^ Elements to format, each of which is a pair: @(compact, multi-line)@
-    -> Doc ann
-enclose beginShort _         _        _       endShort _       []   =
-    beginShort <> endShort
-  where
-enclose beginShort beginLong sepShort sepLong endShort endLong docs =
-    Pretty.group
-        (Pretty.flatAlt
-            (Pretty.align
-                (mconcat (zipWith combineLong (beginLong : repeat sepLong) docsLong) <> endLong)
-            )
-            (mconcat (zipWith combineShort (beginShort : repeat sepShort) docsShort) <> endShort)
-        )
-  where
-    docsShort = fmap fst docs
-
-    docsLong = fmap snd docs
-
-    combineLong x y = x <> y <> Pretty.hardline
-
-    combineShort x y = x <> y
-
-{-| Format an expression that holds a variable number of elements without a
-    trailing document such as nested `let`, nested lambdas, or nested `forall`s
--}
-enclose'
-    :: Doc ann
-    -- ^ Beginning document for compact representation
-    -> Doc ann
-    -- ^ Beginning document for multi-line representation
-    -> Doc ann
-    -- ^ Separator for compact representation
-    -> Doc ann
-    -- ^ Separator for multi-line representation
-    -> [(Doc ann, Doc ann)]
-    -- ^ Elements to format, each of which is a pair: @(compact, multi-line)@
-    -> Doc ann
-enclose' beginShort beginLong sepShort sepLong docs =
-    Pretty.group (Pretty.flatAlt long short)
-  where
-    longLines = zipWith (<>) (beginLong : repeat sepLong) docsLong
-
-    long =
-        Pretty.align (mconcat (Data.List.intersperse Pretty.hardline longLines))
-
-    short = mconcat (zipWith (<>) (beginShort : repeat sepShort) docsShort)
-
-    docsShort = fmap fst docs
-
-    docsLong = fmap snd docs
-
-prettyLabel :: Text -> Doc ann
-prettyLabel a =
-    if Data.HashSet.member a reservedIdentifiers || Text.any predicate a
-    then "`" <> Pretty.pretty a <> "`"
-    else Pretty.pretty a
-  where
-    predicate c = c == ':' || c == '.'
-
-prettyNumber :: Integer -> Doc ann
-prettyNumber = Pretty.pretty
-
-prettyNatural :: Natural -> Doc ann
-prettyNatural = Pretty.pretty
-
-prettyDouble :: Double -> Doc ann
-prettyDouble = Pretty.pretty
-
-prettyChunks :: Pretty a => Chunks s a -> Doc ann
-prettyChunks (Chunks a b) =
-    if any (\(builder, _) -> hasNewLine builder) a || hasNewLine b
-    then
-        Pretty.align
-        (   "''" <> Pretty.hardline
-        <>  Pretty.align
-            (foldMap prettyMultilineChunk a <> prettyMultilineBuilder b)
-        <>  "''"
-        )
-    else "\"" <> foldMap prettyChunk a <> prettyText b <> "\""
-  where
-    hasNewLine builder = Text.any (== '\n') lazyText
-      where
-        lazyText = Builder.toLazyText builder
-
-    prettyMultilineChunk (c, d) =
-      prettyMultilineBuilder c <> "${" <> prettyExprA d <> "}"
-
-    prettyMultilineBuilder builder = mconcat docs
-      where
-        lazyText = Builder.toLazyText (escapeSingleQuotedText builder)
-
-        lazyLines = Text.splitOn "\n" lazyText
-
-        docs =
-            Data.List.intersperse Pretty.hardline (fmap Pretty.pretty lazyLines)
-
-    prettyChunk (c, d) = prettyText c <> "${" <> prettyExprA d <> "}"
-
-    prettyText t = Pretty.pretty (Builder.toLazyText (escapeText t))
-
-prettyConst :: Const -> Doc ann
-prettyConst Type = "Type"
-prettyConst Kind = "Kind"
-
-prettyVar :: Var -> Doc ann
-prettyVar (V x 0) = prettyLabel x
-prettyVar (V x n) = prettyLabel x <> "@" <> prettyNumber n
-
-prettyExprA :: Pretty a => Expr s a -> Doc ann
-prettyExprA a0@(Annot _ _) =
-    enclose' "" "  " " : " ": " (fmap duplicate (docs a0))
-  where
-    docs (Annot a b) = prettyExprB a : docs b
-    docs (Note  _ b) = docs b
-    docs          b  = [ prettyExprB b ]
-prettyExprA (Note _ a) =
-    prettyExprA a
-prettyExprA a0 =
-    prettyExprB a0
-
-prettyExprB :: Pretty a => Expr s a -> Doc ann
-prettyExprB a0@(Lam _ _ _) = arrows (fmap duplicate (docs a0))
-  where
-    docs (Lam a b c) = Pretty.group (Pretty.flatAlt long short) : docs c
-      where
-        long =  "λ "
-            <>  Pretty.align
-                (   "( "
-                <>  prettyLabel a
-                <>  Pretty.hardline
-                <>  ": "
-                <>  prettyExprA b
-                <>  Pretty.hardline
-                <> ")"
-                )
-
-        short = "λ("
-            <>  prettyLabel a
-            <>  " : "
-            <>  prettyExprA b
-            <>  ")"
-    docs (Note  _ c) = docs c
-    docs          c  = [ prettyExprB c ]
-prettyExprB a0@(BoolIf _ _ _) =
-    enclose' "" "      " " else " (Pretty.hardline <> "else  ") (fmap duplicate (docs a0))
-  where
-    docs (BoolIf a b c) =
-        Pretty.group (Pretty.flatAlt long short) : docs c
-      where
-        long =
-             Pretty.align
-                (   "if    "
-                <>  prettyExprA a
-                <>  Pretty.hardline
-                <>  "then  "
-                <>  prettyExprA b
-                )
-
-        short = "if "
-            <>  prettyExprA a
-            <>  " then "
-            <>  prettyExprA b
-    docs (Note  _    c) = docs c
-    docs             c  = [ prettyExprB c ]
-prettyExprB a0@(Pi _ _ _) =
-    arrows (fmap duplicate (docs a0))
-  where
-    docs (Pi "_" b c) = prettyExprC b : docs c
-    docs (Pi a   b c) = Pretty.group (Pretty.flatAlt long short) : docs c
-      where
-        long =  "∀ "
-            <>  Pretty.align
-                (   "( "
-                <>  prettyLabel a
-                <>  Pretty.hardline
-                <>  ": "
-                <>  prettyExprA b
-                <>  Pretty.hardline
-                <>  ")"
-                )
-
-        short = "∀("
-            <>  prettyLabel a
-            <>  " : "
-            <>  prettyExprA b
-            <>  ")"
-    docs (Note _   c) = docs c
-    docs           c  = [ prettyExprB c ]
-prettyExprB a0@(Let _ _ _ _) =
-    enclose' "" "    " " in " (Pretty.hardline <> "in  ")
-        (fmap duplicate (docs a0))
-  where
-    docs (Let a Nothing c d) =
-        Pretty.group (Pretty.flatAlt long short) : docs d
-      where
-        long =  "let "
-            <>  Pretty.align
-                (   prettyLabel a
-                <>  " ="
-                <>  Pretty.hardline
-                <>  "  "
-                <>  prettyExprA c
-                )
-
-        short = "let "
-            <>  prettyLabel a
-            <>  " = "
-            <>  prettyExprA c
-    docs (Let a (Just b) c d) =
-        Pretty.group (Pretty.flatAlt long short) : docs d
-      where
-        long = "let "
-            <>  Pretty.align
-                (   prettyLabel a
-                <>  Pretty.hardline
-                <>  ": "
-                <>  prettyExprA b
-                <>  Pretty.hardline
-                <>  "= "
-                <>  prettyExprA c
-                )
-
-        short = "let "
-            <>  prettyLabel a
-            <>  " : "
-            <>  prettyExprA b
-            <>  " = "
-            <>  prettyExprA c
-    docs (Note _ d)  =
-        docs d
-    docs d =
-        [ prettyExprB d ]
-prettyExprB (ListLit Nothing b) =
-    list (map prettyExprA (Data.Vector.toList b))
-prettyExprB (ListLit (Just a) b) =
-        list (map prettyExprA (Data.Vector.toList b))
-    <>  " : "
-    <>  prettyExprD (App List a)
-prettyExprB (OptionalLit a b) =
-        list (map prettyExprA (Data.Vector.toList b))
-    <>  " : "
-    <>  prettyExprD (App Optional a)
-prettyExprB (Merge a b (Just c)) =
-    Pretty.group (Pretty.flatAlt long short)
-  where
-    long =
-        Pretty.align
-            (   "merge"
-            <>  Pretty.hardline
-            <>  prettyExprE a
-            <>  Pretty.hardline
-            <>  prettyExprE b
-            <>  Pretty.hardline
-            <>  ": "
-            <>  prettyExprD c
-            )
-
-    short = "merge "
-        <>  prettyExprE a
-        <>  " "
-        <>  prettyExprE b
-        <>  " : "
-        <>  prettyExprD c
-prettyExprB (Merge a b Nothing) =
-    Pretty.group (Pretty.flatAlt long short)
-  where
-    long =
-        Pretty.align
-            (   "merge"
-            <>  Pretty.hardline
-            <>  prettyExprE a
-            <>  Pretty.hardline
-            <>  prettyExprE b
-            )
-
-    short = "merge "
-        <>  prettyExprE a
-        <>  " "
-        <>  prettyExprE b
-prettyExprB (Note _ b) =
-    prettyExprB b
-prettyExprB a =
-    prettyExprC a
-
-prettyExprC :: Pretty a => Expr s a -> Doc ann
-prettyExprC = prettyExprC0
-
-prettyExprC0 :: Pretty a => Expr s a -> Doc ann
-prettyExprC0 a0@(BoolOr _ _) =
-    enclose' "" "    " " || " "||  " (fmap duplicate (docs a0))
-  where
-    docs (BoolOr a b) = prettyExprC1 a : docs b
-    docs (Note   _ b) = docs b
-    docs           b  = [ prettyExprC1 b ]
-prettyExprC0 (Note _ a) =
-    prettyExprC0 a
-prettyExprC0 a0 =
-    prettyExprC1 a0
-
-prettyExprC1 :: Pretty a => Expr s a -> Doc ann
-prettyExprC1 a0@(TextAppend _ _) =
-    enclose' "" "    " " ++ " "++  " (fmap duplicate (docs a0))
-  where
-    docs (TextAppend a b) = prettyExprC2 a : docs b
-    docs (Note       _ b) = docs b
-    docs               b  = [ prettyExprC2 b ]
-prettyExprC1 (Note _ a) =
-    prettyExprC1 a
-prettyExprC1 a0 =
-    prettyExprC2 a0
-
-prettyExprC2 :: Pretty a => Expr s a -> Doc ann
-prettyExprC2 a0@(NaturalPlus _ _) =
-    enclose' "" "  " " + " "+ " (fmap duplicate (docs a0))
-  where
-    docs (NaturalPlus a b) = prettyExprC3 a : docs b
-    docs (Note        _ b) = docs b
-    docs                b  = [ prettyExprC3 b ]
-prettyExprC2 (Note _ a) =
-    prettyExprC2 a
-prettyExprC2 a0 =
-    prettyExprC3 a0
-
-prettyExprC3 :: Pretty a => Expr s a -> Doc ann
-prettyExprC3 a0@(ListAppend _ _) =
-    enclose' "" "  " " # " "# " (fmap duplicate (docs a0))
-  where
-    docs (ListAppend a b) = prettyExprC4 a : docs b
-    docs (Note       _ b) = docs b
-    docs               b  = [ prettyExprC4 b ]
-prettyExprC3 (Note _ a) =
-    prettyExprC3 a
-prettyExprC3 a0 =
-    prettyExprC4 a0
-
-prettyExprC4 :: Pretty a => Expr s a -> Doc ann
-prettyExprC4 a0@(BoolAnd _ _) =
-    enclose' "" "    " " && " "&&  " (fmap duplicate (docs a0))
-  where
-    docs (BoolAnd a b) = prettyExprC5 a : docs b
-    docs (Note    _ b) = docs b
-    docs            b  = [ prettyExprC5 b ]
-prettyExprC4 (Note _ a) =
-    prettyExprC4 a
-prettyExprC4 a0 =
-   prettyExprC5 a0
-
-prettyExprC5 :: Pretty a => Expr s a -> Doc ann
-prettyExprC5 a0@(Combine _ _) =
-    enclose' "" "  " " ∧ " "∧ " (fmap duplicate (docs a0))
-  where
-    docs (Combine a b) = prettyExprC6 a : docs b
-    docs (Note    _ b) = docs b
-    docs            b  = [ prettyExprC6 b ]
-prettyExprC5 (Note _ a) =
-    prettyExprC5 a
-prettyExprC5 a0 =
-    prettyExprC6 a0
-
-prettyExprC6 :: Pretty a => Expr s a -> Doc ann
-prettyExprC6 a0@(Prefer _ _) =
-    enclose' "" "  " " ⫽ " "⫽ " (fmap duplicate (docs a0))
-  where
-    docs (Prefer a b) = prettyExprC7 a : docs b
-    docs (Note   _ b) = docs b
-    docs           b  = [ prettyExprC7 b ]
-prettyExprC6 (Note _ a) =
-    prettyExprC6 a
-prettyExprC6 a0 =
-    prettyExprC7 a0
-
-prettyExprC7 :: Pretty a => Expr s a -> Doc ann
-prettyExprC7 a0@(NaturalTimes _ _) =
-    enclose' "" "  " " * " "* " (fmap duplicate (docs a0))
-  where
-    docs (NaturalTimes a b) = prettyExprC8 a : docs b
-    docs (Note         _ b) = docs b
-    docs                 b  = [ prettyExprC8 b ]
-prettyExprC7 (Note _ a) =
-    prettyExprC7 a
-prettyExprC7 a0 =
-    prettyExprC8 a0
-
-prettyExprC8 :: Pretty a => Expr s a -> Doc ann
-prettyExprC8 a0@(BoolEQ _ _) =
-    enclose' "" "    " " == " "==  " (fmap duplicate (docs a0))
-  where
-    docs (BoolEQ a b) = prettyExprC9 a : docs b
-    docs (Note   _ b) = docs b
-    docs           b  = [ prettyExprC9 b ]
-prettyExprC8 (Note _ a) =
-    prettyExprC8 a
-prettyExprC8 a0 =
-    prettyExprC9 a0
-
-prettyExprC9 :: Pretty a => Expr s a -> Doc ann
-prettyExprC9 a0@(BoolNE _ _) =
-    enclose' "" "    " " != " "!=  " (fmap duplicate (docs a0))
-  where
-    docs (BoolNE a b) = prettyExprD a : docs b
-    docs (Note   _ b) = docs b
-    docs           b  = [ prettyExprD b ]
-prettyExprC9 (Note _ a) =
-    prettyExprC9 a
-prettyExprC9 a0 =
-    prettyExprD a0
-
-prettyExprD :: Pretty a => Expr s a -> Doc ann
-prettyExprD a0 = case a0 of
-    App _ _        -> result
-    Constructors _ -> result
-    Note _ b       -> prettyExprD b
-    _              -> prettyExprE a0
-  where
-    result = enclose' "" "" " " "" (fmap duplicate (reverse (docs a0)))
-
-    docs (App        a b) = prettyExprE b : docs a
-    docs (Constructors b) = [ prettyExprE b , "constructors" ]
-    docs (Note       _ b) = docs b
-    docs               b  = [ prettyExprE b ]
-
-prettyExprE :: Pretty a => Expr s a -> Doc ann
-prettyExprE (Field a b) = prettyExprE a <> "." <> prettyLabel b
-prettyExprE (Note  _ b) = prettyExprE b
-prettyExprE  a          = prettyExprF a
-
-prettyExprF :: Pretty a => Expr s a -> Doc ann
-prettyExprF (Var a) =
-    prettyVar a
-prettyExprF (Const k) =
-    prettyConst k
-prettyExprF Bool =
-    "Bool"
-prettyExprF Natural =
-    "Natural"
-prettyExprF NaturalFold =
-    "Natural/fold"
-prettyExprF NaturalBuild =
-    "Natural/build"
-prettyExprF NaturalIsZero =
-    "Natural/isZero"
-prettyExprF NaturalEven =
-    "Natural/even"
-prettyExprF NaturalOdd =
-    "Natural/odd"
-prettyExprF NaturalToInteger =
-    "Natural/toInteger"
-prettyExprF NaturalShow =
-    "Natural/show"
-prettyExprF Integer =
-    "Integer"
-prettyExprF IntegerShow =
-    "Integer/show"
-prettyExprF Double =
-    "Double"
-prettyExprF DoubleShow =
-    "Double/show"
-prettyExprF Text =
-    "Text"
-prettyExprF List =
-    "List"
-prettyExprF ListBuild =
-    "List/build"
-prettyExprF ListFold =
-    "List/fold"
-prettyExprF ListLength =
-    "List/length"
-prettyExprF ListHead =
-    "List/head"
-prettyExprF ListLast =
-    "List/last"
-prettyExprF ListIndexed =
-    "List/indexed"
-prettyExprF ListReverse =
-    "List/reverse"
-prettyExprF Optional =
-    "Optional"
-prettyExprF OptionalFold =
-    "Optional/fold"
-prettyExprF OptionalBuild =
-    "Optional/build"
-prettyExprF (BoolLit True) =
-    "True"
-prettyExprF (BoolLit False) =
-    "False"
-prettyExprF (IntegerLit a) =
-    prettyNumber a
-prettyExprF (NaturalLit a) =
-    "+" <> prettyNatural a
-prettyExprF (DoubleLit a) =
-    prettyDouble a
-prettyExprF (TextLit a) =
-    prettyChunks a
-prettyExprF (Record a) =
-    prettyRecord a
-prettyExprF (RecordLit a) =
-    prettyRecordLit a
-prettyExprF (Union a) =
-    prettyUnion a
-prettyExprF (UnionLit a b c) =
-    prettyUnionLit a b c
-prettyExprF (ListLit Nothing b) =
-    list (map prettyExprA (Data.Vector.toList b))
-prettyExprF (Embed a) =
-    Pretty.pretty a
-prettyExprF (Note _ b) =
-    prettyExprF b
-prettyExprF a =
-    Pretty.group (Pretty.flatAlt long short)
-  where
-    long = Pretty.align ("( " <> prettyExprA a <> Pretty.hardline <> ")")
-
-    short = "(" <> prettyExprA a <> ")"
-
-prettyKeyValue
-    :: Pretty a
-    => Doc ann
-    -> Int
-    -> (Text, Expr s a)
-    -> (Doc ann, Doc ann)
-prettyKeyValue separator keyLength (key, value) =
-    (   prettyLabel key <> " " <> separator <> " " <> prettyExprA value
-    ,       Pretty.fill keyLength (prettyLabel key)
-        <>  " "
-        <>  separator
-        <>  Pretty.group (Pretty.flatAlt long short)
-    )
-  where
-    long = Pretty.hardline <> "    " <> prettyExprA value
-
-    short = " " <> prettyExprA value
-
-prettyRecord :: Pretty a => Map Text (Expr s a) -> Doc ann
-prettyRecord a = braces (map adapt (Data.Map.toList a))
-  where
-    keyLength = fromIntegral (maximum (map Text.length (Data.Map.keys a)))
-
-    adapt = prettyKeyValue ":" keyLength
-
-prettyRecordLit :: Pretty a => Map Text (Expr s a) -> Doc ann
-prettyRecordLit a
-    | Data.Map.null a = "{=}"
-    | otherwise       = braces (map adapt (Data.Map.toList a))
-  where
-    keyLength = fromIntegral (maximum (map Text.length (Data.Map.keys a)))
-
-    adapt = prettyKeyValue "=" keyLength
-
-prettyUnion :: Pretty a => Map Text (Expr s a) -> Doc ann
-prettyUnion a = angles (map adapt (Data.Map.toList a))
-  where
-    keyLength = fromIntegral (maximum (map Text.length (Data.Map.keys a)))
-
-    adapt = prettyKeyValue ":" keyLength
-
-prettyUnionLit :: Pretty a => Text -> Expr s a -> Map Text (Expr s a) -> Doc ann
-prettyUnionLit a b c = angles (front : map adapt (Data.Map.toList c))
-  where
-    keyLength = fromIntegral (maximum (map Text.length (a : Data.Map.keys c)))
-
-    front = prettyKeyValue "=" keyLength (a, b)
-
-    adapt = prettyKeyValue ":" keyLength
-
--- | Pretty-print a value
-pretty :: Pretty a => a -> Text
-pretty = Pretty.renderLazy . Pretty.layoutPretty options . Pretty.pretty
-  where
-   options = Pretty.LayoutOptions { Pretty.layoutPageWidth = Pretty.Unbounded }
-
--- | Builder corresponding to the @label@ token in "Dhall.Parser"
-buildLabel :: Text -> Builder
-buildLabel label =
-    if Data.HashSet.member label reservedIdentifiers || Text.any predicate label
-    then "`" <> build label <> "`"
-    else build label
-  where
-    predicate c = c == ':' || c == '.'
-
--- | Builder corresponding to the @number@ token in "Dhall.Parser"
-buildNumber :: Integer -> Builder
-buildNumber a = build (show a)
-
--- | Builder corresponding to the @natural@ token in "Dhall.Parser"
-buildNatural :: Natural -> Builder
-buildNatural a = build (show a)
-
--- | Builder corresponding to the @double@ token in "Dhall.Parser"
-buildDouble :: Double -> Builder
-buildDouble a = build (show a)
-
--- | Builder corresponding to the @text@ token in "Dhall.Parser"
-buildChunks :: Buildable a => Chunks s a -> Builder
-buildChunks (Chunks a b) = "\"" <> foldMap buildChunk a <> escapeText b <> "\""
-  where
-    buildChunk (c, d) = escapeText c <> "${" <> buildExprA d <> "}"
-
--- | Escape a `Builder` literal using Dhall's escaping rules for single-quoted
---   @Text@
-escapeSingleQuotedText :: Builder -> Builder
-escapeSingleQuotedText inputBuilder = outputBuilder
-  where
-    inputText = Builder.toLazyText inputBuilder
-
-    outputText = substitute "${" "''${" (substitute "''" "'''" inputText)
-
-    outputBuilder = Builder.fromLazyText outputText
-
-    substitute before after = Text.intercalate after . Text.splitOn before
-
--- | Escape a `Builder` literal using Dhall's escaping rules
---
--- Note that the result does not include surrounding quotes
-escapeText :: Builder -> Builder
-escapeText a = Builder.fromLazyText (Text.concatMap adapt text)
-  where
-    adapt c
-        | '\x20' <= c && c <= '\x21' = Text.singleton c
-        -- '\x22' == '"'
-        | '\x23' == c                = Text.singleton c
-        -- '\x24' == '$'
-        | '\x25' <= c && c <= '\x5B' = Text.singleton c
-        -- '\x5C' == '\\'
-        | '\x5D' <= c && c <= '\x7F' = Text.singleton c
-        | c == '"'                   = "\\\""
-        | c == '$'                   = "\\$"
-        | c == '\\'                  = "\\\\"
-        | c == '\b'                  = "\\b"
-        | c == '\f'                  = "\\f"
-        | c == '\n'                  = "\\n"
-        | c == '\r'                  = "\\r"
-        | c == '\t'                  = "\\t"
-        | otherwise                  = "\\u" <> showDigits (Data.Char.ord c)
-
-    showDigits r0 = Text.pack (map showDigit [q1, q2, q3, r3])
-      where
-        (q1, r1) = r0 `quotRem` 4096
-        (q2, r2) = r1 `quotRem`  256
-        (q3, r3) = r2 `quotRem`   16
-
-    showDigit n
-        | n < 10    = Data.Char.chr (Data.Char.ord '0' + n)
-        | otherwise = Data.Char.chr (Data.Char.ord 'A' + n - 10)
-
-    text = Builder.toLazyText a
-
--- | Builder corresponding to the @expr@ parser in "Dhall.Parser"
-buildExpr :: Buildable a => Expr s a -> Builder
-buildExpr = buildExprA
-
--- | Builder corresponding to the @exprA@ parser in "Dhall.Parser"
-buildExprA :: Buildable a => Expr s a -> Builder
-buildExprA (Annot a b) = buildExprB a <> " : " <> buildExprA b
-buildExprA (Note  _ b) = buildExprA b
-buildExprA a           = buildExprB a
-
--- | Builder corresponding to the @exprB@ parser in "Dhall.Parser"
-buildExprB :: Buildable a => Expr s a -> Builder
-buildExprB (Lam a b c) =
-        "λ("
-    <>  buildLabel a
-    <>  " : "
-    <>  buildExprA b
-    <>  ") → "
-    <>  buildExprB c
-buildExprB (BoolIf a b c) =
-        "if "
-    <>  buildExprA a
-    <>  " then "
-    <>  buildExprA b
-    <>  " else "
-    <>  buildExprA c
-buildExprB (Pi "_" b c) =
-        buildExprC b
-    <>  " → "
-    <>  buildExprB c
-buildExprB (Pi a b c) =
-        "∀("
-    <>  buildLabel a
-    <>  " : "
-    <>  buildExprA b
-    <>  ") → "
-    <>  buildExprB c
-buildExprB (Let a Nothing c d) =
-        "let "
-    <>  buildLabel a
-    <>  " = "
-    <>  buildExprA c
-    <>  " in "
-    <>  buildExprB d
-buildExprB (Let a (Just b) c d) =
-        "let "
-    <>  buildLabel a
-    <>  " : "
-    <>  buildExprA b
-    <>  " = "
-    <>  buildExprA c
-    <>  " in "
-    <>  buildExprB d
-buildExprB (ListLit Nothing b) =
-    "[" <> buildElems (Data.Vector.toList b) <> "]"
-buildExprB (ListLit (Just a) b) =
-    "[" <> buildElems (Data.Vector.toList b) <> "] : List "  <> buildExprE a
-buildExprB (OptionalLit a b) =
-    "[" <> buildElems (Data.Vector.toList b) <> "] : Optional "  <> buildExprE a
-buildExprB (Merge a b (Just c)) =
-    "merge " <> buildExprE a <> " " <> buildExprE b <> " : " <> buildExprD c
-buildExprB (Merge a b Nothing) =
-    "merge " <> buildExprE a <> " " <> buildExprE b
-buildExprB (Note _ b) =
-    buildExprB b
-buildExprB a =
-    buildExprC a
-
--- | Builder corresponding to the @exprC@ parser in "Dhall.Parser"
-buildExprC :: Buildable a => Expr s a -> Builder
-buildExprC = buildExprC0
-
--- | Builder corresponding to the @exprC0@ parser in "Dhall.Parser"
-buildExprC0 :: Buildable a => Expr s a -> Builder
-buildExprC0 (BoolOr a b) = buildExprC1 a <> " || " <> buildExprC0 b
-buildExprC0 (Note   _ b) = buildExprC0 b
-buildExprC0  a           = buildExprC1 a
-
--- | Builder corresponding to the @exprC1@ parser in "Dhall.Parser"
-buildExprC1 :: Buildable a => Expr s a -> Builder
-buildExprC1 (TextAppend a b) = buildExprC2 a <> " ++ " <> buildExprC1 b
-buildExprC1 (Note       _ b) = buildExprC1 b
-buildExprC1  a               = buildExprC2 a
-
--- | Builder corresponding to the @exprC2@ parser in "Dhall.Parser"
-buildExprC2 :: Buildable a => Expr s a -> Builder
-buildExprC2 (NaturalPlus a b) = buildExprC3 a <> " + " <> buildExprC2 b
-buildExprC2 (Note        _ b) = buildExprC2 b
-buildExprC2  a                = buildExprC3 a
-
--- | Builder corresponding to the @exprC3@ parser in "Dhall.Parser"
-buildExprC3 :: Buildable a => Expr s a -> Builder
-buildExprC3 (ListAppend a b) = buildExprC4 a <> " # " <> buildExprC3 b
-buildExprC3 (Note       _ b) = buildExprC3 b
-buildExprC3  a               = buildExprC4 a
-
--- | Builder corresponding to the @exprC4@ parser in "Dhall.Parser"
-buildExprC4 :: Buildable a => Expr s a -> Builder
-buildExprC4 (BoolAnd a b) = buildExprC5 a <> " && " <> buildExprC4 b
-buildExprC4 (Note    _ b) = buildExprC4 b
-buildExprC4  a            = buildExprC5 a
-
--- | Builder corresponding to the @exprC5@ parser in "Dhall.Parser"
-buildExprC5 :: Buildable a => Expr s a -> Builder
-buildExprC5 (Combine   a b) = buildExprC6 a <> " ∧ " <> buildExprC5 b
-buildExprC5 (Note      _ b) = buildExprC5 b
-buildExprC5  a              = buildExprC6 a
-
--- | Builder corresponding to the @exprC6@ parser in "Dhall.Parser"
-buildExprC6 :: Buildable a => Expr s a -> Builder
-buildExprC6 (Prefer a b) = buildExprC7 a <> " ⫽ " <> buildExprC6 b
-buildExprC6 (Note   _ b) = buildExprC6 b
-buildExprC6  a           = buildExprC7 a
-
--- | Builder corresponding to the @exprC7@ parser in "Dhall.Parser"
-buildExprC7 :: Buildable a => Expr s a -> Builder
-buildExprC7 (NaturalTimes a b) = buildExprC8 a <> " * " <> buildExprC7 b
-buildExprC7 (Note         _ b) = buildExprC7 b
-buildExprC7  a                 = buildExprC8 a
-
--- | Builder corresponding to the @exprC8@ parser in "Dhall.Parser"
-buildExprC8 :: Buildable a => Expr s a -> Builder
-buildExprC8 (BoolEQ a b) = buildExprC9 a <> " == " <> buildExprC8 b
-buildExprC8 (Note   _ b) = buildExprC8 b
-buildExprC8  a           = buildExprC9 a
-
--- | Builder corresponding to the @exprC9@ parser in "Dhall.Parser"
-buildExprC9 :: Buildable a => Expr s a -> Builder
-buildExprC9 (BoolNE a b) = buildExprD  a <> " != " <> buildExprC9 b
-buildExprC9 (Note   _ b) = buildExprC9 b
-buildExprC9  a           = buildExprD  a
-
--- | Builder corresponding to the @exprD@ parser in "Dhall.Parser"
-buildExprD :: Buildable a => Expr s a -> Builder
-buildExprD (App        a b) = buildExprD a <> " " <> buildExprE b
-buildExprD (Constructors b) = "constructors " <> buildExprE b
-buildExprD (Note       _ b) = buildExprD b
-buildExprD  a               = buildExprE a
-
--- | Builder corresponding to the @exprE@ parser in "Dhall.Parser"
-buildExprE :: Buildable a => Expr s a -> Builder
-buildExprE (Field a b) = buildExprE a <> "." <> buildLabel b
-buildExprE (Note  _ b) = buildExprE b
-buildExprE  a          = buildExprF a
-
--- | Builder corresponding to the @exprF@ parser in "Dhall.Parser"
-buildExprF :: Buildable a => Expr s a -> Builder
-buildExprF (Var a) =
-    buildVar a
-buildExprF (Const k) =
-    buildConst k
-buildExprF Bool =
-    "Bool"
-buildExprF Natural =
-    "Natural"
-buildExprF NaturalFold =
-    "Natural/fold"
-buildExprF NaturalBuild =
-    "Natural/build"
-buildExprF NaturalIsZero =
-    "Natural/isZero"
-buildExprF NaturalEven =
-    "Natural/even"
-buildExprF NaturalOdd =
-    "Natural/odd"
-buildExprF NaturalToInteger =
-    "Natural/toInteger"
-buildExprF NaturalShow =
-    "Natural/show"
-buildExprF Integer =
-    "Integer"
-buildExprF IntegerShow =
-    "Integer/show"
-buildExprF Double =
-    "Double"
-buildExprF DoubleShow =
-    "Double/show"
-buildExprF Text =
-    "Text"
-buildExprF List =
-    "List"
-buildExprF ListBuild =
-    "List/build"
-buildExprF ListFold =
-    "List/fold"
-buildExprF ListLength =
-    "List/length"
-buildExprF ListHead =
-    "List/head"
-buildExprF ListLast =
-    "List/last"
-buildExprF ListIndexed =
-    "List/indexed"
-buildExprF ListReverse =
-    "List/reverse"
-buildExprF Optional =
-    "Optional"
-buildExprF OptionalFold =
-    "Optional/fold"
-buildExprF OptionalBuild =
-    "Optional/build"
-buildExprF (BoolLit True) =
-    "True"
-buildExprF (BoolLit False) =
-    "False"
-buildExprF (IntegerLit a) =
-    buildNumber a
-buildExprF (NaturalLit a) =
-    "+" <> buildNatural a
-buildExprF (DoubleLit a) =
-    buildDouble a
-buildExprF (TextLit a) =
-    buildChunks a
-buildExprF (Record a) =
-    buildRecord a
-buildExprF (RecordLit a) =
-    buildRecordLit a
-buildExprF (Union a) =
-    buildUnion a
-buildExprF (UnionLit a b c) =
-    buildUnionLit a b c
-buildExprF (ListLit Nothing b) =
-    "[" <> buildElems (Data.Vector.toList b) <> "]"
-buildExprF (Embed a) =
-    build a
-buildExprF (Note _ b) =
-    buildExprF b
-buildExprF a =
-    "(" <> buildExprA a <> ")"
-
--- | Builder corresponding to the @const@ parser in "Dhall.Parser"
-buildConst :: Const -> Builder
-buildConst Type = "Type"
-buildConst Kind = "Kind"
-
--- | Builder corresponding to the @var@ parser in "Dhall.Parser"
-buildVar :: Var -> Builder
-buildVar (V x 0) = buildLabel x
-buildVar (V x n) = buildLabel x <> "@" <> buildNumber n
-
--- | Builder corresponding to the @elems@ parser in "Dhall.Parser"
-buildElems :: Buildable a => [Expr s a] -> Builder
-buildElems   []   = ""
-buildElems   [a]  = buildExprA a
-buildElems (a:bs) = buildExprA a <> ", " <> buildElems bs
-
--- | Builder corresponding to the @recordLit@ parser in "Dhall.Parser"
-buildRecordLit :: Buildable a => Map Text (Expr s a) -> Builder
-buildRecordLit a | Data.Map.null a =
-    "{=}"
-buildRecordLit a =
-    "{ " <> buildFieldValues (Data.Map.toList a) <> " }"
-
--- | Builder corresponding to the @fieldValues@ parser in "Dhall.Parser"
-buildFieldValues :: Buildable a => [(Text, Expr s a)] -> Builder
-buildFieldValues    []  = ""
-buildFieldValues   [a]  = buildFieldValue a
-buildFieldValues (a:bs) = buildFieldValue a <> ", " <> buildFieldValues bs
-
--- | Builder corresponding to the @fieldValue@ parser in "Dhall.Parser"
-buildFieldValue :: Buildable a => (Text, Expr s a) -> Builder
-buildFieldValue (a, b) = buildLabel a <> " = " <> buildExprA b
-
--- | Builder corresponding to the @record@ parser in "Dhall.Parser"
-buildRecord :: Buildable a => Map Text (Expr s a) -> Builder
-buildRecord a | Data.Map.null a =
-    "{}"
-buildRecord a =
-    "{ " <> buildFieldTypes (Data.Map.toList a) <> " }"
-
--- | Builder corresponding to the @fieldTypes@ parser in "Dhall.Parser"
-buildFieldTypes :: Buildable a => [(Text, Expr s a)] -> Builder
-buildFieldTypes    []  = ""
-buildFieldTypes   [a]  = buildFieldType a
-buildFieldTypes (a:bs) = buildFieldType a <> ", " <> buildFieldTypes bs
-
--- | Builder corresponding to the @fieldType@ parser in "Dhall.Parser"
-buildFieldType :: Buildable a => (Text, Expr s a) -> Builder
-buildFieldType (a, b) = buildLabel a <> " : " <> buildExprA b
-
--- | Builder corresponding to the @union@ parser in "Dhall.Parser"
-buildUnion :: Buildable a => Map Text (Expr s a) -> Builder
-buildUnion a | Data.Map.null a =
-    "<>"
-buildUnion a =
-    "< " <> buildAlternativeTypes (Data.Map.toList a) <> " >"
-
--- | Builder corresponding to the @alternativeTypes@ parser in "Dhall.Parser"
-buildAlternativeTypes :: Buildable a => [(Text, Expr s a)] -> Builder
-buildAlternativeTypes [] =
-    ""
-buildAlternativeTypes [a] =
-    buildAlternativeType a
-buildAlternativeTypes (a:bs) =
-    buildAlternativeType a <> " | " <> buildAlternativeTypes bs
-
--- | Builder corresponding to the @alternativeType@ parser in "Dhall.Parser"
-buildAlternativeType :: Buildable a => (Text, Expr s a) -> Builder
-buildAlternativeType (a, b) = buildLabel a <> " : " <> buildExprA b
-
--- | Builder corresponding to the @unionLit@ parser in "Dhall.Parser"
-buildUnionLit
-    :: Buildable a => Text -> Expr s a -> Map Text (Expr s a) -> Builder
-buildUnionLit a b c
-    | Data.Map.null c =
-            "< "
-        <>  buildLabel a
-        <>  " = "
-        <>  buildExprA b
-        <>  " >"
-    | otherwise =
-            "< "
-        <>  buildLabel a
-        <>  " = "
-        <>  buildExprA b
-        <>  " | "
-        <>  buildAlternativeTypes (Data.Map.toList c)
-        <>  " >"
-
 -- | Generates a syntactically valid Dhall program
 instance Buildable a => Buildable (Expr s a) where
     build = buildExpr
 
 instance Pretty a => Pretty (Expr s a) where
-    pretty = prettyExprA
+    pretty = Pretty.unAnnotate . prettyExpr
 
 {-| `shift` is used by both normalization and type-checking to avoid variable
     capture by shifting variable indices
@@ -2051,7 +1039,7 @@ normalizeWith ctx e0 = loop (denote e0)
             App IntegerShow (IntegerLit n) ->
                 TextLit (Chunks [] (buildNumber n))
             App DoubleShow (DoubleLit n) ->
-                TextLit (Chunks [] (buildDouble n))
+                TextLit (Chunks [] (buildScientific n))
             App (App OptionalBuild t) k
                 | check     -> OptionalLit t k'
                 | otherwise -> App f' a'
@@ -2109,12 +1097,12 @@ normalizeWith ctx e0 = loop (denote e0)
             App (App ListIndexed t) (ListLit _ xs) ->
                 loop (ListLit (Just t') (fmap adapt (Data.Vector.indexed xs)))
               where
-                t' = Record (Data.Map.fromList kts)
+                t' = Record (Data.HashMap.Strict.InsOrd.fromList kts)
                   where
                     kts = [ ("index", Natural)
                           , ("value", t)
                           ]
-                adapt (n, x) = RecordLit (Data.Map.fromList kvs)
+                adapt (n, x) = RecordLit (Data.HashMap.Strict.InsOrd.fromList kvs)
                   where
                     kvs = [ ("index", NaturalLit (fromIntegral n))
                           , ("value", x)
@@ -2288,7 +1276,7 @@ normalizeWith ctx e0 = loop (denote e0)
         let combine x y = case x of
                 RecordLit kvsX -> case y of
                     RecordLit kvsY ->
-                        let kvs = Data.Map.unionWith combine kvsX kvsY
+                        let kvs = Data.HashMap.Strict.InsOrd.unionWith combine kvsX kvsY
                         in  RecordLit (fmap loop kvs)
                     _ -> Combine x y
                 _ -> Combine x y
@@ -2298,7 +1286,7 @@ normalizeWith ctx e0 = loop (denote e0)
             RecordLit kvsX ->
                 case y' of
                     RecordLit kvsY ->
-                        RecordLit (fmap loop (Data.Map.union kvsY kvsX))
+                        RecordLit (fmap loop (Data.HashMap.Strict.InsOrd.union kvsY kvsX))
                     _ -> Prefer x' y'
             _ -> Prefer x' y'
       where
@@ -2309,7 +1297,7 @@ normalizeWith ctx e0 = loop (denote e0)
             RecordLit kvsX ->
                 case y' of
                     UnionLit kY vY _ ->
-                        case Data.Map.lookup kY kvsX of
+                        case Data.HashMap.Strict.InsOrd.lookup kY kvsX of
                             Just vX -> loop (App vX vY)
                             Nothing -> Merge x' y' t'
                     _ -> Merge x' y' t'
@@ -2322,18 +1310,18 @@ normalizeWith ctx e0 = loop (denote e0)
         case t' of
             Union kts -> RecordLit kvs
               where
-                kvs = Data.Map.mapWithKey adapt kts
+                kvs = Data.HashMap.Strict.InsOrd.mapWithKey adapt kts
 
                 adapt k t_ = Lam k t_ (UnionLit k (Var (V k 0)) rest)
                   where
-                    rest = Data.Map.delete k kts
+                    rest = Data.HashMap.Strict.InsOrd.delete k kts
             _ -> Constructors t'
       where
         t' = loop t
     Field r x        ->
         case loop r of
             RecordLit kvs ->
-                case Data.Map.lookup x kvs of
+                case Data.HashMap.Strict.InsOrd.lookup x kvs of
                     Just v  -> loop v
                     Nothing -> Field (RecordLit (fmap loop kvs)) x
             r' -> Field r' x
@@ -2535,7 +1523,7 @@ isNormalized e = case denote e of
             RecordLit kvsX ->
                 case y of
                     UnionLit kY _  _ ->
-                        case Data.Map.lookup kY kvsX of
+                        case Data.HashMap.Strict.InsOrd.lookup kY kvsX of
                             Just _  -> False
                             Nothing -> True
                     _ -> True
@@ -2547,7 +1535,7 @@ isNormalized e = case denote e of
     Field r x -> isNormalized r &&
         case r of
             RecordLit kvs ->
-                case Data.Map.lookup x kvs of
+                case Data.HashMap.Strict.InsOrd.lookup x kvs of
                     Just _  -> False
                     Nothing -> True
             _ -> True
@@ -2614,6 +1602,7 @@ reservedIdentifiers =
         , "else"
         , "as"
         , "using"
+        , "constructors"
         , "Natural"
         , "Natural/fold"
         , "Natural/build"
@@ -2636,5 +1625,6 @@ reservedIdentifiers =
         , "List/indexed"
         , "List/reverse"
         , "Optional"
+        , "Optional/build"
         , "Optional/fold"
         ]

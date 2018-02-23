@@ -24,6 +24,18 @@ formatTests =
         , should
             "escape ${ for single-quoted strings"
             "escapeSingleQuotedOpenInterpolation"
+        , should
+            "preserve the original order of fields"
+            "fieldOrder"
+        , should
+            "escape numeric labels correctly"
+            "escapeNumericLabel"
+        , should
+            "correctly handle scientific notation with a large exponent"
+            "largeExponent"
+        , should
+            "correctly format the empty record literal"
+            "emptyRecord"
         ]
 
 opts :: Data.Text.Prettyprint.Doc.LayoutOptions

@@ -1,7 +1,9 @@
 {-# LANGUAGE DataKinds          #-}
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE ExplicitNamespaces #-}
+{-# LANGUAGE FlexibleInstances  #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE TypeOperators      #-}
 
 {-| Utility executable for pretty-printing Dhall code
@@ -30,9 +32,8 @@ import Control.Monad (when)
 import Data.Monoid ((<>))
 import Data.Version (showVersion)
 import Dhall.Parser (exprAndHeaderFromText)
-import Filesystem.Path.CurrentOS (FilePath)
-import Options.Generic (Generic, ParseRecord, type (<?>)(..))
-import Prelude hiding (FilePath)
+import Dhall.Pretty (annToAnsiStyle, prettyExpr)
+import Options.Generic (Generic, ParseRecord, Wrapped, type (<?>)(..), (:::))
 import System.IO (stderr)
 import System.Exit (exitFailure, exitSuccess)
 import Text.Trifecta.Delta (Delta(..))
@@ -43,18 +44,18 @@ import qualified Control.Exception
 import qualified Data.Text.IO
 import qualified Data.Text.Lazy
 import qualified Data.Text.Lazy.IO
-import qualified Data.Text.Prettyprint.Doc             as Pretty
-import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
-import qualified Filesystem.Path.CurrentOS
+import qualified Data.Text.Prettyprint.Doc                 as Pretty
+import qualified Data.Text.Prettyprint.Doc.Render.Terminal as Pretty
 import qualified Options.Generic
+import qualified System.Console.ANSI
 import qualified System.IO
 
-data Options = Options
-    { version :: Bool           <?> "Display version and exit"
-    , inplace :: Maybe FilePath <?> "Modify the specified file in-place"
+data Options w = Options
+    { version :: w ::: Bool           <?> "Display version and exit"
+    , inplace :: w ::: Maybe FilePath <?> "Modify the specified file in-place"
     } deriving (Generic)
 
-instance ParseRecord Options
+instance ParseRecord (Options Wrapped)
 
 opts :: Pretty.LayoutOptions
 opts =
@@ -63,8 +64,8 @@ opts =
 
 main :: IO ()
 main = do
-    options <- Options.Generic.getRecord "Formatter for the Dhall language"
-    when (unHelpful (version options)) $ do
+    Options {..} <- Options.Generic.unwrapRecord "Formatter for the Dhall language"
+    when version $ do
       putStrLn (showVersion Meta.version)
       exitSuccess
 
@@ -75,17 +76,16 @@ main = do
             System.Exit.exitFailure
 
     Control.Exception.handle handler (do
-        case unHelpful (inplace options) of
+        case inplace of
             Just file -> do
-                let fileString = Filesystem.Path.CurrentOS.encodeString file
-                strictText <- Data.Text.IO.readFile fileString
+                strictText <- Data.Text.IO.readFile file
                 let lazyText = Data.Text.Lazy.fromStrict strictText
                 (header, expr) <- case exprAndHeaderFromText (Directed "(stdin)" 0 0 0 0) lazyText of
                     Left  err -> Control.Exception.throwIO err
                     Right x   -> return x
 
                 let doc = Pretty.pretty header <> Pretty.pretty expr
-                System.IO.withFile fileString System.IO.WriteMode (\handle -> do
+                System.IO.withFile file System.IO.WriteMode (\handle -> do
                     Pretty.renderIO handle (Pretty.layoutSmart opts doc)
                     Data.Text.IO.hPutStrLn handle "" )
             Nothing -> do
@@ -96,6 +96,17 @@ main = do
                     Left  err -> Control.Exception.throwIO err
                     Right x   -> return x
 
-                let doc = Pretty.pretty header <> Pretty.pretty expr
-                Pretty.renderIO System.IO.stdout (Pretty.layoutSmart opts doc)
-                Data.Text.IO.putStrLn "" )
+                let doc = Pretty.pretty header <> prettyExpr expr
+
+                supportsANSI <- System.Console.ANSI.hSupportsANSI System.IO.stdout
+
+                if supportsANSI
+                  then
+                    Pretty.renderIO
+                      System.IO.stdout
+                      (fmap annToAnsiStyle (Pretty.layoutSmart opts doc))
+                  else
+                    Pretty.renderIO
+                      System.IO.stdout
+                      (Pretty.layoutSmart opts (Pretty.unAnnotate doc))
+                Data.Text.IO.putStrLn "")
