@@ -510,7 +510,12 @@ typeWithAN nrm tpa = loop
                 case s of
                     Const Type -> return ()
                     Const Kind -> return ()
-                    _          -> Left (TypeError ctx e (InvalidFieldType k t))
+                    other -> loop ctx other >>= \x -> case x of
+                    -- This codepath doesn't come into play for vanilla Dhall,
+                    -- but can come in handy with Embedded terms that introduce
+                    -- new Kinds
+                      Const Kind -> return ()
+                      _          -> Left (TypeError ctx e (InvalidFieldType k t))
         mapM_ process (Data.HashMap.Strict.InsOrd.toList kts)
         return (Const Type)
     loop ctx e@(RecordLit kvs   ) = do
