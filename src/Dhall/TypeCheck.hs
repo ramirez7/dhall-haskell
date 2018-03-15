@@ -124,8 +124,20 @@ propEqual nrm eL0 eR0 =
             loop _  _  = return False
         loop (toSortedList ktsL0) (toSortedList ktsR0)
     go (Embed eL) (Embed eR) = return (eL == eR)
+    -- TODO (armando): Hacks to make some typelit stuff I'm doing work
+    go (TextLit (Chunks [] tL)) (TextLit (Chunks [] tR)) = return $ tL == tR
+    go (NaturalLit nL) (NaturalLit nR) = return $ nL == nR
+    -- TODO: Fix this up
+    go (ListLit _ xsL) (ListLit _ xsR) = do
+      let loop (tL:tsL) (tR:tsR) = do
+            b <- go tL tR
+            if b
+                then loop tsL tsR
+                else return False
+          loop [] [] = return True
+          loop _ _ = return False
+      loop (Data.Vector.toList xsL) (Data.Vector.toList xsR)
     go _ _ = return False
-
 {-| Type-check an expression and return the expression's type if type-checking
     succeeds or an error if type-checking fails
 
