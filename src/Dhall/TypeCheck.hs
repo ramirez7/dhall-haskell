@@ -99,6 +99,7 @@ typeWithAN
 typeWithAN nrm tpa = loop
   where
     normalizeTy = Dhall.Core.normalizeWith nrm
+    equalTy = Dhall.Core.judgmentallyEqualWith nrm
     loop _     (Const c         ) = do
         fmap Const (axiom c)
     loop ctx e@(Var (V x n)     ) = do
@@ -136,7 +137,7 @@ typeWithAN nrm tpa = loop
             Pi x _A _B -> return (x, _A, _B)
             _          -> Left (TypeError ctx e (NotAFunction f tf))
         _A' <- loop ctx a
-        if Dhall.Core.judgmentallyEqual _A _A'
+        if equalTy _A _A'
             then do
                 let a'   = Dhall.Core.shift   1  (V x 0) a
                 let _B'  = Dhall.Core.subst (V x 0) a' _B
@@ -153,7 +154,7 @@ typeWithAN nrm tpa = loop
                 _ <- loop ctx _A0
                 let nf_A0 = normalizeTy _A0
                 let nf_A1 = normalizeTy _A1
-                if Dhall.Core.judgmentallyEqual _A0 _A1
+                if equalTy _A0 _A1
                     then return ()
                     else Left (TypeError ctx e (AnnotMismatch a0 nf_A0 nf_A1))
             Nothing -> return ()
@@ -166,7 +167,7 @@ typeWithAN nrm tpa = loop
         _ <- loop ctx t
 
         t' <- loop ctx x
-        if Dhall.Core.judgmentallyEqual t t'
+        if equalTy t t'
             then do
                 return t
             else do
@@ -242,7 +243,7 @@ typeWithAN nrm tpa = loop
             Const Type -> return ()
             _          -> Left (TypeError ctx e (IfBranchMustBeTerm False z tz ttz))
 
-        if Dhall.Core.judgmentallyEqual ty tz
+        if equalTy ty tz
             then return ()
             else Left (TypeError ctx e (IfBranchMismatch y z ty tz))
         return ty
@@ -340,7 +341,7 @@ typeWithAN nrm tpa = loop
                     _ -> Left (TypeError ctx e (InvalidListType t))
                 flip traverseWithIndex_ xs (\i x -> do
                     t' <- loop ctx x
-                    if Dhall.Core.judgmentallyEqual t t'
+                    if equalTy t t'
                         then return ()
                         else do
                             let nf_t  = normalizeTy t
@@ -356,7 +357,7 @@ typeWithAN nrm tpa = loop
             _ -> Left (TypeError ctx e (InvalidListType t))
         flip traverseWithIndex_ xs (\i x -> do
             t' <- loop ctx x
-            if Dhall.Core.judgmentallyEqual t t'
+            if equalTy t t'
                 then return ()
                 else do
                     let nf_t  = normalizeTy t
@@ -374,7 +375,7 @@ typeWithAN nrm tpa = loop
             App List er -> return er
             _           -> Left (TypeError ctx e (CantListAppend r tr))
 
-        if Dhall.Core.judgmentallyEqual el er
+        if equalTy el er
             then return (App List el)
             else Left (TypeError ctx e (ListAppendMismatch el er))
     loop _      ListBuild         = do
@@ -415,7 +416,7 @@ typeWithAN nrm tpa = loop
             _ -> Left (TypeError ctx e (InvalidOptionalType t))
         forM_ xs (\x -> do
             t' <- loop ctx x
-            if Dhall.Core.judgmentallyEqual t t'
+            if equalTy t t'
                 then return ()
                 else do
                     let nf_t  = normalizeTy t
@@ -548,10 +549,10 @@ typeWithAN nrm tpa = loop
                     Just tX  ->
                         case tX of
                             Pi _ tY' t' -> do
-                                if Dhall.Core.judgmentallyEqual tY tY'
+                                if equalTy tY tY'
                                     then return ()
                                     else Left (TypeError ctx e (HandlerInputTypeMismatch kY tY tY'))
-                                if Dhall.Core.judgmentallyEqual t t'
+                                if equalTy t t'
                                     then return ()
                                     else Left (TypeError ctx e (InvalidHandlerOutputType kY t t'))
                             _ -> Left (TypeError ctx e (HandlerNotAFunction kY tX))
@@ -587,10 +588,10 @@ typeWithAN nrm tpa = loop
                     Just tX  ->
                         case tX of
                             Pi _ tY' t' -> do
-                                if Dhall.Core.judgmentallyEqual tY tY'
+                                if equalTy tY tY'
                                     then return ()
                                     else Left (TypeError ctx e (HandlerInputTypeMismatch kY tY tY'))
-                                if Dhall.Core.judgmentallyEqual t t'
+                                if equalTy t t'
                                     then return ()
                                     else Left (TypeError ctx e (HandlerOutputTypeMismatch kX t kY t'))
                             _ -> Left (TypeError ctx e (HandlerNotAFunction kY tX))

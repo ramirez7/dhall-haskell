@@ -33,6 +33,7 @@ module Dhall.Core (
     , normalizeWith
     , Normalizer
     , judgmentallyEqual
+    , judgmentallyEqualWith
     , subst
     , shift
     , isNormalized
@@ -1546,10 +1547,13 @@ normalizeWith ctx e0 = loop (denote e0)
     `False` otherwise
 -}
 judgmentallyEqual :: Eq a => Expr s a -> Expr t a -> Bool
-judgmentallyEqual eL0 eR0 = alphaBetaNormalize eL0 == alphaBetaNormalize eR0
+judgmentallyEqual = judgmentallyEqualWith (const Nothing)
+
+judgmentallyEqualWith :: Eq a => Normalizer a -> Expr s a -> Expr t a -> Bool
+judgmentallyEqualWith nrm eL0 eR0 = alphaBetaNormalize nrm eL0 == alphaBetaNormalize nrm eR0
   where
-    alphaBetaNormalize :: Eq a => Expr s a -> Expr () a
-    alphaBetaNormalize = alphaNormalize . normalize
+    alphaBetaNormalize :: Eq a => Normalizer a -> Expr s a -> Expr () a
+    alphaBetaNormalize n = alphaNormalize . normalizeWith n
 
 -- | Use this to wrap you embedded functions (see `normalizeWith`) to make them
 --   polymorphic enough to be used.
