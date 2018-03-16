@@ -98,7 +98,7 @@ import qualified Data.Text.Prettyprint.Doc             as Pretty
     Note that Dhall does not support functions from terms to types and therefore
     Dhall is not a dependently typed language
 -}
-data Const = Type | Kind deriving (Show, Eq, Bounded, Enum)
+data Const = Type | Kind deriving (Show, Eq, Ord, Bounded, Enum)
 
 instance Buildable Const where
     build = buildConst
@@ -194,7 +194,7 @@ instance Pretty Path where
     appear as a numeric suffix.
 -}
 data Var = V Text !Integer
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 instance IsString Var where
     fromString str = V (fromString str) 0
